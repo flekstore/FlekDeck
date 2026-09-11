@@ -115,7 +115,7 @@ FlekDeck is free software distributed under the
 [GNU Affero General Public License v3.0](./LICENSE).
 
 The corresponding source code for this version of FlekDeck is available at:
-[FLEKDECK SOURCE CODE URL].
+[FlekDeck source code](https://github.com/flekstore/FlekDeck).
 
 Copyright © 2026 FlekStore.
 
