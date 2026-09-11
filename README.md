@@ -12,7 +12,7 @@ FlekDeck is a powerful app environment designed to feel like a second operating 
 
 It brings together a familiar Home Screen, built-in multitasking, fast app switching, a dedicated Installer, and extensive customization in one seamless experience. Discover and install apps from your repositories, run multiple apps at the same time, personalize your workspace, and switch between apps just like you are used to on iOS.
 
-Built on [LiveContainer](https://github.com/LiveContainer/LiveContainer) and reimagined from the ground up, FlekDeck also includes dozens of compatibility and stability improvements for hundreds of apps.
+FlekDeck is a modified version of [LiveContainer](https://github.com/LiveContainer/LiveContainer), developed and maintained by FlekStore. It adds a redesigned home screen, installer, customization options, and compatibility improvements.
 
 > [!NOTE]
 > FlekDeck runs apps inside its own environment. It is an app launcher, not an emulator or a virtual machine.
@@ -95,8 +95,29 @@ Apps running inside a container may not be isolated from one another in the same
 
 ## Credits
 
-FlekDeck is developed and maintained by [FlekStore](https://flekstore.com).
+FlekDeck is developed and maintained by
+[FlekStore](https://flekstore.com).
 
-FlekDeck is based on the open-source [LiveContainer project](https://github.com/LiveContainer/LiveContainer). We are grateful to the LiveContainer maintainers and contributors whose work made FlekDeck possible.
+FlekDeck is based on the open-source
+[LiveContainer](https://github.com/LiveContainer/LiveContainer) project.
+We are grateful to its maintainers and contributors.
 
-FlekDeck is distributed under the same license as the original LiveContainer: the [GNU Affero General Public License v3.0](https://github.com/LiveContainer/LiveContainer/blob/main/LICENSE).
+FlekDeck also uses third-party open-source components. Their respective
+authors, copyright notices, and licenses are listed in
+[THIRD_PARTY_NOTICES.md](./THIRD_PARTY_NOTICES.md).
+
+## License
+
+FlekDeck is a modified version of
+[LiveContainer](https://github.com/LiveContainer/LiveContainer).
+
+FlekDeck is free software distributed under the
+[GNU Affero General Public License v3.0](./LICENSE).
+
+The corresponding source code for this version of FlekDeck is available at:
+[FLEKDECK SOURCE CODE URL].
+
+Copyright © 2026 FlekStore.
+
+See [THIRD_PARTY_NOTICES.md](./THIRD_PARTY_NOTICES.md) for third-party
+copyright notices and licenses..
