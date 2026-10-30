@@ -529,6 +529,7 @@ struct FlekInstallerView: View {
         }
         .frame(height: 44)
         .scrollClipDisabledIfAvailable()  // let each pill's shadow draw past the 44pt scroll bounds (no bottom cutout)
+        .clippedAtVerticalBar()
     }
 
     private func categoryPill(_ title: String, selected: Bool, action: @escaping () -> Void) -> some View {
@@ -1215,6 +1216,10 @@ private extension View {
         return AnyView(self)
     }
 
+    /// Cuts a row that draws past its ends at the side the system's vertical bar
+    /// runs down, and nowhere else. See `VerticalBarSideClip`.
+    func clippedAtVerticalBar() -> some View { modifier(VerticalBarSideClip()) }
+
     /// See `RepoPillSurface`.
     func repoPillGlass() -> some View { modifier(RepoPillSurface()) }
 
@@ -1256,6 +1261,64 @@ private struct RepoPillSurface: ViewModifier {
                 )
                 .clipShape(Capsule())
         )
+    }
+}
+
+/// Keeps a row that draws past its ends from drawing under the system's vertical
+/// bar.
+///
+/// The category row turns scroll clipping off so each pill's shadow can fall
+/// outside it, which lets the pills scroll out past its ends as well. On an
+/// upright iPhone those ends are the screen's own and nothing shows; on the iPhone
+/// Duo the trailing end is where the status bar's column begins, and the pills slid
+/// in under it. So the row is cut at the side that holds the bar and only there:
+/// the shadows above and below, and the other end, draw as before. With no
+/// vertical bar nothing is cut at all.
+private struct VerticalBarSideClip: ViewModifier {
+    func body(content: Content) -> some View {
+        if #available(iOS 27.1, *) {
+            content.modifier(Cut())
+        } else {
+            content
+        }
+    }
+
+    @available(iOS 27.1, *)
+    private struct Cut: ViewModifier {
+        @Environment(\.toolbarVerticalEdge) private var barEdge
+        @Environment(\.layoutDirection) private var layoutDirection
+
+        // Clipped whether or not there is a bar, to a shape that cuts nothing
+        // without one, so that folding or unfolding does not rebuild the row and
+        // lose how far it was scrolled.
+        func body(content: Content) -> some View {
+            content.clipShape(OneSideCut(side: barSide))
+        }
+
+        /// The bar's side on screen: its edge follows the layout direction, and the
+        /// clip is drawn left to right.
+        private var barSide: OneSideCut.Side? {
+            guard let barEdge else { return nil }
+            let isTrailing = barEdge == .trailing
+            return isTrailing == (layoutDirection == .leftToRight) ? .right : .left
+        }
+    }
+}
+
+/// A view's own rectangle opened out far past it on every side except `side`,
+/// where it stops at the view's edge.
+private struct OneSideCut: Shape {
+    enum Side { case left, right }
+    let side: Side?
+
+    /// Far enough past the view to take in anything drawn beyond it on screen.
+    private static let reach: CGFloat = 1_000
+
+    func path(in rect: CGRect) -> Path {
+        let minX = side == .left ? rect.minX : rect.minX - Self.reach
+        let maxX = side == .right ? rect.maxX : rect.maxX + Self.reach
+        return Path(CGRect(x: minX, y: rect.minY - Self.reach,
+                           width: maxX - minX, height: rect.height + Self.reach * 2))
     }
 }
 
