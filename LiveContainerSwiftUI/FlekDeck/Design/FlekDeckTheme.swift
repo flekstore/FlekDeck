@@ -140,6 +140,24 @@ enum FlekTheme {
     /// indicator the bar reaches back down past it.
     static let bottomBarScreenMargin: CGFloat = 28
 
+    // The side bar: the search button and the running apps stood on end in the
+    // column the iPhone Duo's vertical status bar runs down, when Personalization
+    // puts them there. The system gives no geometry for that column, so these are
+    // measured off it in iOS 27.2, folded and unfolded alike: it is centred 48pt in
+    // from the edge of the display, its pill is 56pt across, and the Wi-Fi glyph in
+    // it is 41pt.
+
+    /// From the edge of the display to the middle of the column.
+    static let sideBarCentreInset: CGFloat = 48
+    /// Across the column: the search button's diameter, and the running apps' pill —
+    /// the width of the status bar's own pill.
+    static let sideBarWidth: CGFloat = 56
+    /// A running app's icon in the column, the size of the status bar's Wi-Fi glyph.
+    static let sideBarAppIconSize: CGFloat = 41
+    /// The glyph in the column's buttons: the same share of them as the bottom
+    /// bar's glyph is of its controls.
+    static var sideBarGlyphSize: CGFloat { sideBarWidth * 0.42 }
+
     /// A navigation control: the circle a back or close button occupies, at the
     /// size the system gives the same buttons in a navigation bar. Fixed rather
     /// than a share of the width — a back button is the size it is on every
@@ -207,6 +225,33 @@ extension View {
             return AnyView(self.glassEffect(.regular, in: RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)))
         }
         return AnyView(self.background(FlekGlassBackground(cornerRadius: cornerRadius, tint: tint)))
+    }
+}
+
+/// Reports the edge the system's vertical bar runs down — nil where it places
+/// none — once on appearing and again whenever the edge changes.
+///
+/// The vertical bar, and the environment value that names its edge, arrived in
+/// iOS 27.1; before that there is never one to report.
+struct FlekVerticalBarEdgeReader: View {
+    @Binding var edge: HorizontalEdge?
+
+    var body: some View {
+        if #available(iOS 27.1, *) {
+            Observer(edge: $edge)
+        }
+    }
+
+    @available(iOS 27.1, *)
+    private struct Observer: View {
+        @Environment(\.toolbarVerticalEdge) private var current
+        @Binding var edge: HorizontalEdge?
+
+        var body: some View {
+            Color.clear
+                .onAppear { edge = current }
+                .onChange(of: current) { _, new in edge = new }
+        }
     }
 }
 

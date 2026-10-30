@@ -35,6 +35,10 @@ enum FlekDeviceModel {
         identifier.hasPrefix("iPad") || UIDevice.current.userInterfaceIdiom == .pad
     }
 
+    /// Whether this is an iPhone Duo, whose status bar runs down one side of
+    /// the display rather than across the top.
+    static var isDuo: Bool { identifier == "iPhone19,4" }
+
     /// From Xcode's own list of devices, with the identifiers it leaves out
     /// for the same devices with other radios or for other markets.
     private static let names: [String: String] = [
@@ -88,6 +92,7 @@ enum FlekDeviceModel {
         "iPhone18,5": "iPhone 17e",
         "iPhone19,2": "iPhone 18 Pro",
         "iPhone19,3": "iPhone 18 Pro Max",
+        "iPhone19,4": "iPhone Duo",
         "iPad5,1": "iPad mini 4",
         "iPad5,2": "iPad mini 4",
         "iPad5,3": "iPad Air 2",

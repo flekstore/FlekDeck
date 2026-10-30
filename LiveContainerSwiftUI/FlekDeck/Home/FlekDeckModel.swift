@@ -13,6 +13,7 @@ enum FlekDeckKeys {
     static let wallpaperName = "FlekWallpaperName"   // bundled wallpaper asset name
     static let wallpaperPhoto = "FlekWallpaperPhoto" // file name of a user-picked photo wallpaper
     static let homeLayout = "FlekHomeLayout"         // "grid" | "list"
+    static let homeBarPosition = "FlekHomeBarPosition" // "bottom" | "side" — iPhone Duo only
     static let launchedApps = "FlekLaunchedApps"     // bundle paths that have been opened at least once
     static let homeScreenOrder = "FlekHomeScreenOrder" // ordered IDs of all home screen items (default apps + installed)
     static let homeScreenPageSizes = "FlekHomeScreenPageSizes" // per-page item counts for custom page layouts
@@ -23,6 +24,15 @@ enum FlekDeckKeys {
 enum FlekHomeLayout: String {
     case grid
     case list
+}
+
+/// Where the home screen keeps its search button and running apps, chosen on the
+/// Personalization page. Offered only on the iPhone Duo, whose status bar runs down
+/// one side of the display: `side` stands them in that same column, below it, and
+/// gives the room they took at the bottom back to the grid.
+enum FlekHomeBarPosition: String {
+    case bottom
+    case side
 }
 
 /// The three built-in "apps" pinned at the start of the home screen.

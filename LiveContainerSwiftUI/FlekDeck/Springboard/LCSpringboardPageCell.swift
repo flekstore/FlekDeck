@@ -117,6 +117,17 @@ final class LCSpringboardPageCell: UICollectionViewCell {
                + barClearance - safeAreaBottom)
     }
 
+    /// Padding above the springboard when the search button and the running apps
+    /// stand in the side column. A display with its status bar down one side has
+    /// none across the top, so the grid sits as far from the top as from the sides.
+    static let sideBarGridTopPadding: CGFloat = phoneSideMargin
+
+    /// How far the springboard stops short of the bottom of the display when no
+    /// bar sits there: the page dots' strip ends here, clear of the home indicator.
+    /// Measured from the display's edge rather than the safe area's, since only the
+    /// dots reach into the inset — the room the bar took goes to one more row.
+    static let sideBarGridBottomMargin: CGFloat = 16
+
     /// Whether a page of this size uses the iPad grid.
     ///
     /// Decided by the width alone, not by the kind of device. No iPhone page gets
@@ -246,9 +257,16 @@ final class LCSpringboardPageCell: UICollectionViewCell {
     /// The springboard's own size on a screen of the given size: the safe area
     /// and the padding around the grid taken off. For callers that have no view
     /// to measure but need to arrive at the same page capacity.
-    static func estimatedPageSize(screenSize: CGSize, safeAreaInsets: UIEdgeInsets) -> CGSize {
-        CGSize(
-            width: screenSize.width - safeAreaInsets.left - safeAreaInsets.right,
+    static func estimatedPageSize(screenSize: CGSize, safeAreaInsets: UIEdgeInsets,
+                                  barOnSide: Bool = false) -> CGSize {
+        let width = screenSize.width - safeAreaInsets.left - safeAreaInsets.right
+        guard !barOnSide else {
+            return CGSize(width: width,
+                          height: screenSize.height - safeAreaInsets.top
+                            - sideBarGridTopPadding - sideBarGridBottomMargin)
+        }
+        return CGSize(
+            width: width,
             height: screenSize.height - safeAreaInsets.top - safeAreaInsets.bottom
                 - gridTopPadding - gridBottomPadding(safeAreaBottom: safeAreaInsets.bottom)
         )

@@ -6173,7 +6173,7 @@ struct AppSwitcherCard: View {
 struct MultitaskHomeIcons: View {
     @ObservedObject var dockManager = MultitaskDockManager.shared
     let darkModeIcon: Bool
-    private var iconSize: CGFloat { FlekTheme.bottomBarAppIconSize }
+    var iconSize: CGFloat = FlekTheme.bottomBarAppIconSize
 
     var body: some View {
         ForEach(Array(dockManager.apps.suffix(4))) { app in
@@ -6191,6 +6191,10 @@ private struct MultitaskHomeIcon: View {
     let app: DockAppModel
     let iconSize: CGFloat
 
+    /// The icon's own rounded corners, which the side column's pill keeps clear of
+    /// its curved end.
+    static let cornerRadius: CGFloat = 10
+
     @ObservedObject private var dockManager = MultitaskDockManager.shared
     @State private var scale: CGFloat = 1
 
@@ -6203,14 +6207,14 @@ private struct MultitaskHomeIcon: View {
                 Image(uiImage: icon)
                     .resizable()
                     .aspectRatio(contentMode: .fit)
-                    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                    .clipShape(RoundedRectangle(cornerRadius: Self.cornerRadius, style: .continuous))
                     .frame(width: iconSize, height: iconSize)
             } else {
                 Image(systemName: "app.fill")
                     .font(.system(size: 20))
                     .foregroundStyle(.white.opacity(0.6))
                     .frame(width: iconSize, height: iconSize)
-                    .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Color.gray.opacity(0.3)))
+                    .background(RoundedRectangle(cornerRadius: Self.cornerRadius, style: .continuous).fill(Color.gray.opacity(0.3)))
             }
         }
         .buttonStyle(.plain)
@@ -6259,31 +6263,66 @@ extension Notification.Name {
 struct MultitaskHomeDockPill: View {
     @ObservedObject private var dockManager = MultitaskDockManager.shared
     let darkModeIcon: Bool
+    /// Which way the pill runs: along the bottom bar, or down the side column
+    /// beside an iPhone Duo's vertical status bar.
+    var axis: Axis = .horizontal
 
     private var hasApps: Bool { !dockManager.apps.isEmpty }
-    private var pillHeight: CGFloat { FlekTheme.bottomBarControlSize }
+    /// Across the pill: its height along the bottom, its width down the side.
+    private var thickness: CGFloat {
+        axis == .horizontal ? FlekTheme.bottomBarControlSize : FlekTheme.sideBarWidth
+    }
+    private var iconSize: CGFloat {
+        axis == .horizontal ? FlekTheme.bottomBarAppIconSize : FlekTheme.sideBarAppIconSize
+    }
+    private var glyphSize: CGFloat {
+        axis == .horizontal ? FlekTheme.bottomBarGlyphSize : FlekTheme.sideBarGlyphSize
+    }
 
     var body: some View {
         if hasApps {
+            appsStack
+                .modifier(DockPillBackground(isCircle: false))
+                .background(
+                    GeometryReader { geometry in
+                        Color.clear
+                            .onAppear { publishPillFrame(geometry.frame(in: .global)) }
+                            .onChange(of: geometry.frame(in: .global)) { publishPillFrame($0) }
+                    }
+                )
+        } else {
+            switcherButton
+                .frame(width: thickness, height: thickness)
+                .modifier(DockPillBackground(isCircle: true))
+        }
+    }
+
+    /// The running apps, then the switcher button: left to right along the bottom,
+    /// top to bottom down the side, where the switcher's glyph is centred on the
+    /// curve of the pill's lower end.
+    ///
+    /// The first icon down the side starts a corner radius short of the centre of
+    /// the pill's upper end. Its corners then lie on that end's curve at the same
+    /// distance its sides keep from the pill's sides. Started that distance from the
+    /// top instead, as it first was, the square icon fits the round end at its
+    /// middle only, and its corners all but touched the curve.
+    @ViewBuilder
+    private var appsStack: some View {
+        if axis == .horizontal {
             HStack(spacing: 8) {
-                MultitaskHomeIcons(darkModeIcon: darkModeIcon)
+                MultitaskHomeIcons(darkModeIcon: darkModeIcon, iconSize: iconSize)
                 switcherButton
             }
             .padding(.leading, 16)
             .padding(.trailing, 10)
-            .frame(height: pillHeight)
-            .modifier(DockPillBackground(isCircle: false))
-            .background(
-                GeometryReader { geometry in
-                    Color.clear
-                        .onAppear { publishPillFrame(geometry.frame(in: .global)) }
-                        .onChange(of: geometry.frame(in: .global)) { publishPillFrame($0) }
-                }
-            )
+            .frame(height: thickness)
         } else {
-            switcherButton
-                .frame(width: pillHeight, height: pillHeight)
-                .modifier(DockPillBackground(isCircle: true))
+            VStack(spacing: 8) {
+                MultitaskHomeIcons(darkModeIcon: darkModeIcon, iconSize: iconSize)
+                switcherButton
+            }
+            .padding(.top, thickness / 2 - MultitaskHomeIcon.cornerRadius)
+            .frame(width: thickness)
         }
     }
 
@@ -6301,9 +6340,9 @@ struct MultitaskHomeDockPill: View {
             MultitaskDockManager.shared.showAppSwitcher()
         } label: {
             Image(systemName: FlekSymbol.appSwitcher)
-                .font(.system(size: FlekTheme.bottomBarGlyphSize, weight: .regular))
+                .font(.system(size: glyphSize, weight: .regular))
                 .foregroundStyle(Color.primary.opacity(0.6))
-                .frame(width: FlekTheme.bottomBarControlSize, height: FlekTheme.bottomBarControlSize)
+                .frame(width: thickness, height: thickness)
         }
         .buttonStyle(.plain)
     }

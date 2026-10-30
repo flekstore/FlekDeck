@@ -23,6 +23,10 @@ struct FlekHomeListView<Menu: View>: View {
     /// Whether to show the single-mode launch badge (app.dashed) for an app,
     /// matching the grid's per-cell indicator. Shown in the row's trailing slot.
     var showsSingleBadge: (LCAppModel) -> Bool = { _ in false }
+    /// Whether the search button and the running apps are in the side column,
+    /// leaving nothing along the bottom for the rows to clear but the home
+    /// indicator.
+    var barOnSide: Bool = false
     @ViewBuilder var contextMenu: (FlekHomeItem) -> Menu
 
     /// Observed for the built-in apps' badges, so the Settings count comes and
@@ -82,7 +86,7 @@ struct FlekHomeListView<Menu: View>: View {
             // Inset past the top safe area and the bottom bar so rows scroll
             // *behind* them instead of stopping short at their edges.
             .padding(.top, geo.safeAreaInsets.top + 16)
-            .padding(.bottom, geo.safeAreaInsets.bottom + 89)
+            .padding(.bottom, geo.safeAreaInsets.bottom + (barOnSide ? 16 : 89))
         }
         .ignoresSafeArea(edges: [.top, .bottom])
         }

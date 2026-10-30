@@ -15933,6 +15933,39 @@
         }
       }
     },
+    "lc.flek.barBottom" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Bottom"
+          }
+        }
+      }
+    },
+    "lc.flek.barPosition" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Bar Position"
+          }
+        }
+      }
+    },
+    "lc.flek.barSide" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Side"
+          }
+        }
+      }
+    },
     "lc.flek.cancelInstall" : {
       "extractionState" : "manual",
       "localizations" : {

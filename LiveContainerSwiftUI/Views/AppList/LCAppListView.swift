@@ -135,6 +135,9 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
     @State private var installerPreselectRepoURL: String?
     @AppStorage("darkModeIcon", store: LCUtils.appGroupUserDefault) var darkModeIcon = false
     @AppStorage(FlekDeckKeys.homeLayout, store: LCUtils.appGroupUserDefault) var homeLayout: String = FlekHomeLayout.grid.rawValue
+    @AppStorage(FlekDeckKeys.homeBarPosition, store: LCUtils.appGroupUserDefault) var homeBarPosition: String = FlekHomeBarPosition.bottom.rawValue
+    /// The edge an iPhone Duo's status bar runs down; nil wherever there is none.
+    @State private var verticalBarEdge: HorizontalEdge?
 
 
     @State private var homeSaveIconExporterShow = false
@@ -191,31 +194,36 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         return .spring(response: 0.42, dampingFraction: 0.82)
     }
 
-    /// Bottom home bar: the multitask dock pill (only while apps are running)
-    /// beside a persistent search button. The search button keeps its identity
-    /// across states, so it glides as the pill springs in/out — a morph rather
-    /// than a cross-fade.
+    /// The home bar: the multitask dock pill (only while apps are running) beside
+    /// a persistent search button — along the bottom, or stood on end in the side
+    /// column (`.vertical`). The search button keeps its identity across states,
+    /// so it glides as the pill springs in/out — a morph rather than a cross-fade.
     // Erased to AnyView: `GlassEffectContainer` and `glassEffect` are iOS 26-only
     // types, and an opaque return type would bake them into this property's static
     // type. The runtime resolves that type before it ever runs the availability
     // check, so on iOS 17.x the lookup fails and the Swift runtime traps.
-    private var homeBottomBar: AnyView {
+    private func homeBar(axis: Axis) -> AnyView {
+        let controlSize = axis == .horizontal ? FlekTheme.bottomBarControlSize : FlekTheme.sideBarWidth
+        let glyphSize = axis == .horizontal ? FlekTheme.bottomBarGlyphSize : FlekTheme.sideBarGlyphSize
+        // The pill grows out of the search button's side: from the end that
+        // faces it, whichever way the bar runs.
+        let pillAnchor: UnitPoint = axis == .horizontal ? .trailing : .bottom
         if #available(iOS 26.0, *) {
             return AnyView(
                 GlassEffectContainer(spacing: 10) {
-                    HStack(spacing: 10) {
+                    FlekBarStack(axis: axis, spacing: 10) {
                         if showMultitaskDock {
-                            MultitaskHomeDockPill(darkModeIcon: darkModeIcon)
-                                .transition(.scale(scale: 0.6, anchor: .trailing).combined(with: .opacity))
+                            MultitaskHomeDockPill(darkModeIcon: darkModeIcon, axis: axis)
+                                .transition(.scale(scale: 0.6, anchor: pillAnchor).combined(with: .opacity))
                                 .installerBarShadow()
                         }
                         Button {
                             showSearch = true
                         } label: {
                             Image(systemName: "magnifyingglass")
-                                .font(.system(size: FlekTheme.bottomBarGlyphSize, weight: .regular))
+                                .font(.system(size: glyphSize, weight: .regular))
                                 .foregroundStyle(Color.primary.opacity(0.6))
-                                .frame(width: FlekTheme.bottomBarControlSize, height: FlekTheme.bottomBarControlSize)
+                                .frame(width: controlSize, height: controlSize)
                         }
                         .buttonStyle(.plain)
                         .glassEffect(in: .circle)
@@ -226,13 +234,13 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             )
         }
         return AnyView(
-            HStack(spacing: 10) {
+            FlekBarStack(axis: axis, spacing: 10) {
                 if #available(iOS 16.0, *), showMultitaskDock {
-                    MultitaskHomeDockPill(darkModeIcon: darkModeIcon)
-                        .transition(.scale(scale: 0.6, anchor: .trailing).combined(with: .opacity))
+                    MultitaskHomeDockPill(darkModeIcon: darkModeIcon, axis: axis)
+                        .transition(.scale(scale: 0.6, anchor: pillAnchor).combined(with: .opacity))
                         .installerBarShadow()
                 }
-                FlekGlassCircleButton(systemImage: "magnifyingglass") {
+                FlekGlassCircleButton(systemImage: "magnifyingglass", size: controlSize) {
                     showSearch = true
                 }
                 .installerBarShadow()
@@ -240,8 +248,63 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             .animation(dockEntranceAnimation, value: showMultitaskDock)
         )
     }
+
+    /// Whether the search button and the running apps stand in the side column
+    /// rather than along the bottom: chosen on Personalization, and only while an
+    /// iPhone Duo's status bar is actually running down a side. Anywhere else the
+    /// bottom bar stands in.
+    private var isHomeBarOnSide: Bool {
+        homeBarPosition == FlekHomeBarPosition.side.rawValue
+            && FlekDeviceModel.isDuo && verticalBarEdge != nil
+    }
+
+    /// The bar stood on end in the column the status bar runs down: the running
+    /// apps' pill above the search button, centred on the status bar's own column
+    /// and as far from the bottom of the display as the bottom bar sits.
+    private func homeSideColumn(on edge: HorizontalEdge) -> some View {
+        Group {
+            if isEditing {
+                Button {
+                    isEditing = false
+                } label: {
+                    sideDoneLabel
+                }
+                .buttonStyle(.plain)
+            } else {
+                homeBar(axis: .vertical)
+                    .id(colorScheme)
+            }
+        }
+        .padding(edge == .leading ? .leading : .trailing,
+                 FlekTheme.sideBarCentreInset - FlekTheme.sideBarWidth / 2)
+        .padding(.bottom, FlekTheme.bottomBarScreenMargin)
+        .frame(maxWidth: .infinity, maxHeight: .infinity,
+               alignment: edge == .leading ? .bottomLeading : .bottomTrailing)
+        .ignoresSafeArea()
+    }
+
+    /// Edit mode's Done in the side column: the checkmark alone, in a circle the
+    /// size of the search button it stands in for. Erased to AnyView — see
+    /// `homeBar(axis:)` for why.
+    private var sideDoneLabel: AnyView {
+        let label = Image(systemName: "checkmark")
+            .font(.system(size: FlekTheme.sideBarGlyphSize, weight: .semibold))
+            .foregroundStyle(Color.primary.opacity(0.75))
+            .frame(width: FlekTheme.sideBarWidth, height: FlekTheme.sideBarWidth)
+
+        if #available(iOS 26.0, *) {
+            return AnyView(label.glassEffect(.regular.interactive(false), in: .circle))
+        }
+        return AnyView(
+            label
+                .background(Circle().fill(.ultraThinMaterial))
+                .overlay(Circle().fill(Color.primary.opacity(0.15)))
+                .overlay(Circle().strokeBorder(Color.primary.opacity(0.15), lineWidth: 0.5))
+        )
+    }
     @Environment(\.colorScheme) private var colorScheme
-    
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+
     @ObservedObject var searchContext: SearchContext
     /// The device's own bottom safe-area inset — the home indicator, if there is one.
     @State private var homeBottomSafeInset: CGFloat = LCDeviceSafeArea.bottomInset()
@@ -325,7 +388,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             // same CAFilter variable blur the installer uses at its bottom edge:
             // clear at the top, ramping to full blur at the bottom, reaching up
             // to just above the search / multitask bar.
-            if homeLayout == FlekHomeLayout.list.rawValue && !showSearch {
+            if homeLayout == FlekHomeLayout.list.rawValue && !showSearch && !isHomeBarOnSide {
                 GeometryReader { geo in
                     VariableBlurView(maxBlurRadius: 4, direction: .bottom)
                         .frame(height: geo.safeAreaInsets.bottom + 100)
@@ -337,6 +400,9 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             }
 
             if !showSearch {
+            if isHomeBarOnSide, let verticalBarEdge {
+                homeSideColumn(on: verticalBarEdge)
+            } else {
             VStack {
                 Spacer()
                 if isEditing {
@@ -350,10 +416,11 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                     // entering edit mode does not shift the control's position.
                     .padding(.bottom, homeBottomBarInset)
                 } else {
-                    homeBottomBar
+                    homeBar(axis: .horizontal)
                         .id(colorScheme)
                         .padding(.bottom, homeBottomBarInset)
                 }
+            }
             }
             }
             }
@@ -396,6 +463,15 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             }
         }
         .animation(.easeOut(duration: 0.25), value: showSearch)
+        .background(FlekVerticalBarEdgeReader(edge: $verticalBarEdge))
+        // Folding or unfolding an iPhone Duo moves the app to another display,
+        // whose bottom inset need not be this one's.
+        .onChange(of: verticalBarEdge) { _ in
+            homeBottomSafeInset = LCDeviceSafeArea.bottomInset()
+        }
+        .onChange(of: horizontalSizeClass) { _ in
+            homeBottomSafeInset = LCDeviceSafeArea.bottomInset()
+        }
         .onAppear {
             homeBottomSafeInset = LCDeviceSafeArea.bottomInset()
             if !didAppear { onAppear() }
@@ -798,7 +874,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         ))
     }
 
-    /// Erased to AnyView — see `homeBottomBar` for why.
+    /// Erased to AnyView — see `homeBar(axis:)` for why.
     private var doneButtonLabel: AnyView {
         let label = HStack(spacing: 6) {
             Image(systemName: "checkmark")
@@ -841,6 +917,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                     onDropCompleted: { persistHomeOrder() },
                     onCancelInstall: { installQueue.cancel($0) },
                     showsSingleBadge: { _ = launchModeVersion; return FlekLaunchModeStore.shared.showsSingleBadge(for: $0) },
+                    barOnSide: isHomeBarOnSide,
                     contextMenu: { item in homeContextMenu(for: item) }
                 )
             } else {
@@ -859,9 +936,16 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                 // Grid keeps the original fixed insets (list handles its own).
                 // Shared with the grid maths, which works the page size back out
                 // from the screen when there is no view to measure.
-                .padding(.top, LCSpringboardPageCell.gridTopPadding)
-                .padding(.bottom, LCSpringboardPageCell.gridBottomPadding(
-                    safeAreaBottom: homeBottomSafeInset))
+                //
+                // With the bar in the side column, the grid runs on down into the
+                // bottom inset to a margin measured from the display's edge — so
+                // the padding goes negative where the inset is deeper than that.
+                .padding(.top, isHomeBarOnSide
+                         ? LCSpringboardPageCell.sideBarGridTopPadding
+                         : LCSpringboardPageCell.gridTopPadding)
+                .padding(.bottom, isHomeBarOnSide
+                         ? LCSpringboardPageCell.sideBarGridBottomMargin - homeBottomSafeInset
+                         : LCSpringboardPageCell.gridBottomPadding(safeAreaBottom: homeBottomSafeInset))
             }
         }
     }
@@ -1139,7 +1223,8 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             .first ?? UIEdgeInsets(top: 59, left: 0, bottom: 34, right: 0)
         let pageSize = LCSpringboardPageCell.estimatedPageSize(
             screenSize: screenBounds.size,
-            safeAreaInsets: safeArea
+            safeAreaInsets: safeArea,
+            barOnSide: isHomeBarOnSide
         )
         return LCSpringboardPageCell.itemsPerPage(forPageSize: pageSize)
     }
@@ -2852,3 +2937,19 @@ private struct OrientationLockModifier: ViewModifier {
     }
 }
 
+
+/// An HStack or a VStack, for the home bar running along the bottom or down the
+/// side column.
+private struct FlekBarStack<Content: View>: View {
+    let axis: Axis
+    let spacing: CGFloat
+    @ViewBuilder let content: () -> Content
+
+    var body: some View {
+        if axis == .horizontal {
+            HStack(spacing: spacing, content: content)
+        } else {
+            VStack(spacing: spacing, content: content)
+        }
+    }
+}

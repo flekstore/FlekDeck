@@ -24,6 +24,8 @@ struct FlekPersonalizationView: View {
     private var wallpaperPhoto: String = ""
     @AppStorage(FlekDeckKeys.homeLayout, store: LCUtils.appGroupUserDefault)
     private var homeLayout: String = FlekHomeLayout.grid.rawValue
+    @AppStorage(FlekDeckKeys.homeBarPosition, store: LCUtils.appGroupUserDefault)
+    private var homeBarPosition: String = FlekHomeBarPosition.bottom.rawValue
 
     @AppStorage("dynamicColors", store: LCUtils.appGroupUserDefault) private var dynamicColors = true
     @AppStorage("darkModeIcon", store: LCUtils.appGroupUserDefault) private var darkModeIcon = false
@@ -66,6 +68,22 @@ struct FlekPersonalizationView: View {
                     }
                     .padding(16)
                     .background(card)
+                }
+
+                // MARK: Bar Position
+                // Only the iPhone Duo has a status bar down the side to put the
+                // bar beside.
+                if FlekDeviceModel.isDuo {
+                    VStack(alignment: .leading, spacing: 10) {
+                        sectionHeader("lc.flek.barPosition".loc)
+
+                        HStack(spacing: 8) {
+                            barPositionOption(.bottom, title: "lc.flek.barBottom".loc)
+                            barPositionOption(.side, title: "lc.flek.barSide".loc)
+                        }
+                        .padding(16)
+                        .background(card)
+                    }
                 }
 
                 // MARK: App Icons
@@ -234,12 +252,29 @@ struct FlekPersonalizationView: View {
     }
 
     private func layoutOption(_ layout: FlekHomeLayout, title: String) -> some View {
-        let selected = homeLayout == layout.rawValue
-        return Button {
+        optionTile(title: title, selected: homeLayout == layout.rawValue) {
             homeLayout = layout.rawValue
-        } label: {
+        } glyph: { selected in
+            LayoutGlyph(layout: layout, selected: selected)
+        }
+    }
+
+    private func barPositionOption(_ position: FlekHomeBarPosition, title: String) -> some View {
+        optionTile(title: title, selected: homeBarPosition == position.rawValue) {
+            homeBarPosition = position.rawValue
+        } glyph: { selected in
+            BarPositionGlyph(position: position, selected: selected)
+        }
+    }
+
+    /// One of a pair of choices side by side: a picture of the phone with its name
+    /// under it, the name filled in blue on the one chosen.
+    private func optionTile<Glyph: View>(title: String, selected: Bool,
+                                         action: @escaping () -> Void,
+                                         @ViewBuilder glyph: (Bool) -> Glyph) -> some View {
+        Button(action: action) {
             VStack(spacing: 16) {
-                LayoutGlyph(layout: layout, selected: selected)
+                glyph(selected)
                     .frame(width: 59, height: 100)
                 if selected {
                     Text(title)
@@ -294,6 +329,43 @@ private struct LayoutGlyph: View {
             .foregroundStyle(tint)
             .offset(y: -2)
         }
+    }
+}
+
+/// The same phone, with the bar drawn where it goes: under the grid, or in a
+/// column beside it.
+private struct BarPositionGlyph: View {
+    let position: FlekHomeBarPosition
+    let selected: Bool
+
+    var body: some View {
+        let tint = selected ? Color.accentColor : Color.secondary
+        ZStack {
+            Image(systemName: FlekSymbol.device)
+                .font(.system(size: 80, weight: .thin))
+                .foregroundStyle(tint)
+
+            Group {
+                if position == .bottom {
+                    VStack(spacing: 5) {
+                        grid
+                        Capsule().frame(width: 20, height: 5)
+                    }
+                } else {
+                    HStack(spacing: 5) {
+                        grid
+                        Capsule().frame(width: 5, height: 20)
+                    }
+                }
+            }
+            .foregroundStyle(tint)
+            .offset(y: -2)
+        }
+    }
+
+    private var grid: some View {
+        Image(systemName: "square.grid.3x3.fill")
+            .font(.system(size: 16))
     }
 }
 
