@@ -184,10 +184,11 @@ struct FlekPersonalizationView: View {
 
     // MARK: Pieces
 
-    /// The phone's screen corner radius (private UIScreen value), clamped into the
-    /// slider's range, used as the default so the bar starts matching the device.
+    /// The corner radius of the display the app is on (private UIScreen value),
+    /// clamped into the slider's range, used as the default so the bar starts
+    /// matching the device.
     private static var deviceCornerRadiusDefault: Double {
-        let r = (UIScreen.main.value(forKey: "_displayCornerRadius") as? CGFloat) ?? 0
+        let r = (FlekTheme.screen.value(forKey: "_displayCornerRadius") as? CGFloat) ?? 0
         let v = r > 0 ? Double(r) : 39
         return min(max(v, 10), 60)
     }

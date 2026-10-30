@@ -209,30 +209,33 @@ final class LCSpringboardIconCell: UICollectionViewCell {
     /// `LCMinimizeToIconAnimator` rounds a landing window to.
     private static let iconCornerFraction: CGFloat = 0.2237
 
-    /// The card this icon sits in, worked out from the screen rather than from
-    /// the cell's own bounds: the icon is rasterised when the cell is
-    /// configured, which happens before it has been laid out. Measured across
-    /// the screen's narrow side, so turning the device does not re-render every
-    /// icon at a new size.
-    static var cellWidth: CGFloat {
-        let screen = UIScreen.main.bounds.size
-        return LCSpringboardPageCell.computeCellWidth(
-            forPageSize: CGSize(width: min(screen.width, screen.height),
-                                height: max(screen.width, screen.height))
-        )
+    /// Width of the card this cell is, which everything inside it is a share of.
+    ///
+    /// The card's own width, not one worked out from the screen. A page can be
+    /// narrower than the display it is on: the iPhone Duo's cover display keeps a
+    /// vertical status bar down one side, and icons measured against the whole
+    /// display came out sized for cards a quarter wider than the ones they sat in.
+    /// Handed over by the page with each item, since the icon is rasterised as the
+    /// item arrives, before the cell has been laid out; layout then reads it off the
+    /// cell's own bounds, which a turned iPad grid can make a few points narrower.
+    private var cardWidth: CGFloat = 0
+
+    private var iconSize: CGFloat { (cardWidth * Self.iconWidthFraction).rounded() }
+    private var iconCornerRadius: CGFloat { Self.iconCornerRadius(forIconSize: iconSize) }
+    private var labelSize: CGSize {
+        CGSize(width: (cardWidth * Self.labelWidthFraction).rounded(),
+               height: (cardWidth * Self.labelHeightFraction).rounded())
+    }
+    private var labelTopSpacing: CGFloat {
+        (cardWidth * Self.labelTopSpacingFraction).rounded()
+    }
+    private var labelFont: UIFont {
+        .systemFont(ofSize: (cardWidth * Self.labelFontFraction).rounded(), weight: .medium)
     }
 
-    static var iconSize: CGFloat { (cellWidth * iconWidthFraction).rounded() }
-    static var iconCornerRadius: CGFloat { (iconSize * iconCornerFraction).rounded() }
-    private static var labelSize: CGSize {
-        CGSize(width: (cellWidth * labelWidthFraction).rounded(),
-               height: (cellWidth * labelHeightFraction).rounded())
-    }
-    private static var labelTopSpacing: CGFloat {
-        (cellWidth * labelTopSpacingFraction).rounded()
-    }
-    private static var labelFont: UIFont {
-        .systemFont(ofSize: (cellWidth * labelFontFraction).rounded(), weight: .medium)
+    /// The squircle corner of an icon this many points across.
+    static func iconCornerRadius(forIconSize size: CGFloat) -> CGFloat {
+        (size * iconCornerFraction).rounded()
     }
 
     /// The notification badge's height as a share of the icon's side, so it
@@ -330,6 +333,7 @@ final class LCSpringboardIconCell: UICollectionViewCell {
         super.layoutSubviews()
 
         let bounds = contentView.bounds
+        if bounds.width > 0 { cardWidth = bounds.width }
 
         // Glass card fills the full cell bounds
         glassBackgroundView?.frame = bounds
@@ -337,9 +341,9 @@ final class LCSpringboardIconCell: UICollectionViewCell {
 
         // Content block: icon + spacing + label, centred in the card, so the
         // room left over falls equally above the icon and below the title.
-        let iconS = Self.iconSize
-        let labelS = Self.labelSize
-        let labelGap = Self.labelTopSpacing
+        let iconS = iconSize
+        let labelS = labelSize
+        let labelGap = labelTopSpacing
         let contentHeight = iconS + labelGap + labelS.height
         let contentY = ((bounds.height - contentHeight) / 2).rounded()
 
@@ -347,7 +351,7 @@ final class LCSpringboardIconCell: UICollectionViewCell {
         iconImageView.frame = CGRect(x: iconX, y: contentY, width: iconS, height: iconS)
 
         installOverlay.frame = iconImageView.bounds
-        installOverlay.layer.cornerRadius = Self.iconCornerRadius
+        installOverlay.layer.cornerRadius = iconCornerRadius
         installOverlay.clipsToBounds = true
         failedSymbol.frame = installOverlay.bounds
         // Spinning ring (indeterminate state)
@@ -394,7 +398,7 @@ final class LCSpringboardIconCell: UICollectionViewCell {
         // Rotate so stroke starts at top (clockwise)
         ringFillLayer.transform = CATransform3DMakeRotation(-.pi / 2, 0, 0, 1)
 
-        nameLabel.font = Self.labelFont
+        nameLabel.font = labelFont
         nameLabel.frame = CGRect(
             x: ((bounds.width - labelS.width) / 2).rounded(),
             y: contentY + iconS + labelGap,
@@ -475,15 +479,15 @@ final class LCSpringboardIconCell: UICollectionViewCell {
     }
 
     private static func roundedImage(_ image: UIImage?, size: CGFloat, radius: CGFloat,
-                                     cacheKey: String? = nil) -> UIImage? {
-        guard let image else { return nil }
+                                     scale: CGFloat, cacheKey: String? = nil) -> UIImage? {
+        guard let image, size > 0 else { return nil }
         let key = cacheKey.map { "\($0)|\(size)|\(radius)" as NSString }
         if let key, let cached = roundedCache.object(forKey: key) { return cached }
 
         let rect = CGRect(x: 0, y: 0, width: size, height: size)
         let format = UIGraphicsImageRendererFormat()
         format.opaque = false
-        format.scale = UIScreen.main.scale
+        format.scale = scale
         let rendered = UIGraphicsImageRenderer(size: rect.size, format: format).image { _ in
             UIBezierPath(roundedRect: rect, cornerRadius: radius).addClip()
             image.draw(in: rect)
@@ -546,16 +550,20 @@ final class LCSpringboardIconCell: UICollectionViewCell {
     private var currentName: String?
     private var currentNameIsShared = false
 
-    func configure(with item: FlekHomeItem, darkMode: Bool) {
+    /// - Parameter cardWidth: the width the page lays this card out at — see
+    ///   `cardWidth`.
+    func configure(with item: FlekHomeItem, darkMode: Bool, cardWidth: CGFloat) {
         configuredItem = item
+        if cardWidth > 0 { self.cardWidth = cardWidth }
         // Only a built-in app carries a count. Worked out for every item, as a
         // cell refreshed in place for another item must not keep the last one's.
         var notificationCount = 0
         switch item {
         case .defaultApp(let kind):
             iconImageView.image = Self.roundedImage(UIImage(named: kind.iconAssetName),
-                                                    size: Self.iconSize,
-                                                    radius: Self.iconCornerRadius,
+                                                    size: iconSize,
+                                                    radius: iconCornerRadius,
+                                                    scale: FlekTheme.screen.scale,
                                                     cacheKey: "builtin:\(kind.iconAssetName)")
             setName(kind.title, shared: false)
             notificationCount = kind.badgeCount(in: DataManager.shared.model)
@@ -563,8 +571,9 @@ final class LCSpringboardIconCell: UICollectionViewCell {
 
         case .installed(let app):
             iconImageView.image = Self.roundedImage(app.appInfo.iconIsDarkIcon(darkMode),
-                                                    size: Self.iconSize,
-                                                    radius: Self.iconCornerRadius,
+                                                    size: iconSize,
+                                                    radius: iconCornerRadius,
+                                                    scale: FlekTheme.screen.scale,
                                                     cacheKey: (app.appInfo.relativeBundlePath).map { "app:\($0):\(app.uiIsShared):\(darkMode)" })
             setName(app.appInfo.displayName(), shared: app.uiIsShared)
             showBadges(for: app)
@@ -612,7 +621,7 @@ final class LCSpringboardIconCell: UICollectionViewCell {
             nameLabel.text = name
             return
         }
-        let font = Self.labelFont
+        let font = labelFont
         let attachment = NSTextAttachment()
         // A font-based configuration sizes the symbol to the title and sits it
         // on the same baseline.
@@ -659,9 +668,15 @@ final class LCSpringboardIconCell: UICollectionViewCell {
             if urlStr != loadingIconURL || iconImageView.image == nil {
                 loadingIconURL = urlStr
                 iconLoadTask?.cancel()
+                // Measured here, on the main thread, rather than in the completion
+                // handler: the sizes are read off the app's scene, which UIKit only
+                // answers for on the main thread.
+                let size = iconSize
+                let radius = iconCornerRadius
+                let scale = FlekTheme.screen.scale
                 iconLoadTask = URLSession.shared.dataTask(with: url) { [weak self] data, _, _ in
                     guard let data, let image = UIImage(data: data) else { return }
-                    let rounded = LCSpringboardIconCell.roundedImage(image, size: LCSpringboardIconCell.iconSize, radius: LCSpringboardIconCell.iconCornerRadius)
+                    let rounded = LCSpringboardIconCell.roundedImage(image, size: size, radius: radius, scale: scale)
                     DispatchQueue.main.async {
                         self?.iconImageView.image = rounded
                     }

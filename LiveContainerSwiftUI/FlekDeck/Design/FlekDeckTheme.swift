@@ -70,6 +70,20 @@ enum FlekSymbol {
 }
 
 enum FlekTheme {
+    /// The display the app is on, which the sizes worked out from "the screen"
+    /// are measured against.
+    ///
+    /// Not `UIScreen.main`. That is not tied to any scene, and the iPhone Duo moves
+    /// the app between its cover display and its inner one as it folds and unfolds,
+    /// so a size taken from it can be the size of the display that is switched off.
+    /// The foreground scene's own screen is the one the app is drawn on;
+    /// `UIScreen.main` only stands in before the first scene has connected.
+    static var screen: UIScreen {
+        let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+        let scene = scenes.first { $0.activationState == .foregroundActive } ?? scenes.first
+        return scene?.screen ?? UIScreen.main
+    }
+
     // Springboard grid
     static let gridColumns = 3
     static let gridSpacing: CGFloat = 8
@@ -106,7 +120,7 @@ enum FlekTheme {
     private static let bottomBarControlRange: ClosedRange<CGFloat> = 50...72
 
     static var bottomBarControlSize: CGFloat {
-        let screen = UIScreen.main.bounds.size
+        let screen = Self.screen.bounds.size
         // The narrow side of the screen, so that turning the device — or running
         // in a window that is wider than it is tall — does not resize the bar.
         let width = min(screen.width, screen.height)

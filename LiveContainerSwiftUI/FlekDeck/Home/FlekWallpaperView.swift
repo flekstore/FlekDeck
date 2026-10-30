@@ -111,10 +111,10 @@ enum FlekWallpaperImages {
     /// personalization preview 226pt; 600px covers both at 3x with room to spare.
     static let thumbnailMaxPixel: CGFloat = 600
 
-    /// Longest edge of the display in real pixels — the most a full-screen
-    /// wallpaper can ever show.
+    /// Longest edge of the display the app is on, in real pixels — the most a
+    /// full-screen wallpaper can show there.
     static var screenMaxPixel: CGFloat {
-        let b = UIScreen.main.nativeBounds
+        let b = FlekTheme.screen.nativeBounds
         return max(b.width, b.height)
     }
 
@@ -219,12 +219,12 @@ enum FlekWallpaperStore {
     @discardableResult
     static func savePhoto(_ image: UIImage) -> String? {
         let name = "wallpaper-\(Int(Date().timeIntervalSince1970)).jpg"
-        // Photos arrive straight from the picker at whatever the camera shot —
-        // 48 MP on a recent iPhone, ~190 MB of bitmap. Nothing beyond the
-        // display's own resolution can ever be seen, so store it at that size
-        // rather than paying for the rest on every load and every blur.
-        let sized = FlekWallpaperImages.downscale(image, maxPixel: FlekWallpaperImages.screenMaxPixel)
-        guard let data = sized.jpegData(compressionQuality: 0.85) else { return nil }
+        // Stored at the size it was picked at, not shrunk to the display in use.
+        // On an iPhone Duo that is the cover display while folded, and a photo
+        // shrunk to it goes soft on the inner one once unfolded. The full photo is
+        // never drawn: every load decodes it straight to the display's size
+        // through `downsample(url:maxPixel:)`, and the blur reads it smaller still.
+        guard let data = image.jpegData(compressionQuality: 0.85) else { return nil }
         do {
             try data.write(to: directory.appendingPathComponent(name))
             return name
@@ -328,7 +328,7 @@ struct FlekBlurredWallpaperOverlay: View {
             return
         }
 
-        let screenSize = UIScreen.main.bounds.size
+        let screenSize = FlekTheme.screen.bounds.size
         let sourceImage: UIImage?
 
         // A Gaussian blur is a lowpass filter: everything it is about to throw

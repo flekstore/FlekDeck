@@ -49,6 +49,7 @@ struct FlekInstallerView: View {
     @State private var importURLInput = false
     @FocusState private var searchFocused: Bool
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.verticalSizeClass) private var verticalSizeClass
     @StateObject private var importUrlHelper = InputHelper()
     /// Asks for a URL or URL scheme to open, as LiveContainer's link button did.
     @StateObject private var openURLHelper = InputHelper()
@@ -198,6 +199,11 @@ struct FlekInstallerView: View {
             // the page is being read, so re-deriving the bar's layout from one
             // only reintroduces whatever its fallbacks answer.
             guard UIDevice.current.orientation.isValidInterfaceOrientation else { return }
+            updateSwitcherBarState()
+        }
+        // Folding or unfolding an iPhone Duo moves the bar without turning the
+        // device, and the height class is what the bar's edge follows.
+        .onChange(of: verticalSizeClass) { _ in
             updateSwitcherBarState()
         }
         .onAppear {
@@ -1068,10 +1074,13 @@ struct FlekInstallerView: View {
             .compactMap({ $0 as? UIWindowScene })
             .first(where: { $0.activationState == .foregroundActive })
             ?? (UIApplication.shared.connectedScenes.first as? UIWindowScene) {
-            // Matches the dock's own rule: on iPad the bar stays along the bottom in
-            // both orientations, so bottom content must keep making room for it.
+            // Matches the dock's own rule: the bar only leaves the bottom when the
+            // height is short. On iPad, and on the unfolded iPhone Duo, it stays
+            // along the bottom in both orientations, so bottom content must keep
+            // making room for it.
             barIsLandscape = scene.interfaceOrientation.isLandscape
-                && UIDevice.current.userInterfaceIdiom != .pad
+                && scene.traitCollection.userInterfaceIdiom != .pad
+                && scene.traitCollection.verticalSizeClass == .compact
         }
         if #available(iOS 16.0, *) {
             let mgr = MultitaskDockManager.shared
@@ -1524,6 +1533,8 @@ struct FlekRemoteIcon: View {
     var size: CGFloat
     var corner: CGFloat
 
+    @Environment(\.displayScale) private var displayScale
+
     var body: some View {
         KFImage(URL(string: url))
             .placeholder {
@@ -1533,7 +1544,7 @@ struct FlekRemoteIcon: View {
             // cancel in-flight loads when the row scrolls away — keeps long result
             // lists smooth and bounds memory.
             .setProcessor(DownsamplingImageProcessor(size: CGSize(width: size, height: size)))
-            .scaleFactor(UIScreen.main.scale)
+            .scaleFactor(displayScale)
             .cacheOriginalImage()
             .cancelOnDisappear(true)
             .fade(duration: 0.15)   // only animates on a network load, not on a cache hit

@@ -32,6 +32,7 @@ struct FlekSearchView: View {
     @State private var bottomBarHeight: CGFloat = 66   // measured at runtime; sensible fallback
     @StateObject private var repoSearch = MultiRepoSearchModel()
     @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.displayScale) private var displayScale
 
     private var results: [LCAppModel] {
         guard !debouncedQuery.isEmpty else { return [] }
@@ -179,7 +180,7 @@ struct FlekSearchView: View {
                     KFImage(url)
                         .placeholder { FlekImagePlaceholder(cornerRadius: 4) }
                         .setProcessor(DownsamplingImageProcessor(size: CGSize(width: 18, height: 18)))
-                        .scaleFactor(UIScreen.main.scale)
+                        .scaleFactor(displayScale)
                         .cacheOriginalImage()
                         .cancelOnDisappear(true)
                         .fade(duration: 0.15)

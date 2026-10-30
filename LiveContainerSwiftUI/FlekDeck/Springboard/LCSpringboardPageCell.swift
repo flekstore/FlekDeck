@@ -58,8 +58,9 @@ final class LCSpringboardPageCell: UICollectionViewCell {
     /// the springboard draws along the bottom of its own view.
     private static let phoneBottomReserve: CGFloat = 30
 
-    /// Narrowest window that gets the iPad grid. Below it — Slide Over, a small
-    /// Stage Manager window — the phone's three columns suit the width better.
+    /// Narrowest page that gets the iPad grid, on any device. Below it — an iPhone
+    /// held upright, Slide Over, a small Stage Manager window — the phone's three
+    /// columns suit the width better.
     private static let padMinWidth: CGFloat = 600
 
     /// The iPad grid is fixed rather than derived from the height, and both ways
@@ -117,8 +118,14 @@ final class LCSpringboardPageCell: UICollectionViewCell {
     }
 
     /// Whether a page of this size uses the iPad grid.
+    ///
+    /// Decided by the width alone, not by the kind of device. No iPhone page gets
+    /// there: the springboard is held upright, and the widest iPhone is 440pt
+    /// across. The unfolded iPhone Duo does, and it needs to — it is a tablet-sized
+    /// display on a phone, where three columns would stretch each card to 200 to
+    /// 290pt across.
     static func usesPadGrid(pageSize: CGSize) -> Bool {
-        UIDevice.current.userInterfaceIdiom == .pad && pageSize.width >= padMinWidth
+        pageSize.width >= padMinWidth
     }
 
     private static func padGrid(forPageSize size: CGSize) -> (columns: Int, rows: Int) {
@@ -304,8 +311,14 @@ final class LCSpringboardPageCell: UICollectionViewCell {
             guard let iconCell = cell as? LCSpringboardIconCell,
                   let idx = collectionView.indexPath(for: iconCell)?.item,
                   idx < items.count else { continue }
-            iconCell.configure(with: items[idx], darkMode: darkModeIcon)
+            iconCell.configure(with: items[idx], darkMode: darkModeIcon, cardWidth: cardWidth)
         }
+    }
+
+    /// The width this page lays its cards out at, which the icon inside each one
+    /// is sized from — the same width `updateFlowLayout` gives the layout.
+    private var cardWidth: CGFloat {
+        Self.computeCellWidth(forPageSize: contentView.bounds.size)
     }
 
     // MARK: - Edit mode
@@ -401,7 +414,7 @@ extension LCSpringboardPageCell: UICollectionViewDataSource {
         let cell = collectionView.dequeueReusableCell(withReuseIdentifier: "IconCell", for: indexPath) as! LCSpringboardIconCell
         let item = items[indexPath.item]
 
-        cell.configure(with: item, darkMode: darkModeIcon)
+        cell.configure(with: item, darkMode: darkModeIcon, cardWidth: cardWidth)
 
         // Edit mode state
         if isEditing && !cell.isPlaceholderCell {
@@ -494,7 +507,7 @@ extension LCSpringboardPageCell: UICollectionViewDelegate {
         params.backgroundColor = .clear
         params.visiblePath = UIBezierPath(
             roundedRect: cell.iconImageView.bounds,
-            cornerRadius: LCSpringboardIconCell.iconCornerRadius
+            cornerRadius: LCSpringboardIconCell.iconCornerRadius(forIconSize: cell.iconImageView.bounds.width)
         )
         params.shadowPath = UIBezierPath()
         return UITargetedPreview(view: cell.iconImageView, parameters: params)
@@ -507,7 +520,7 @@ extension LCSpringboardPageCell: UICollectionViewDelegate {
         params.backgroundColor = .clear
         params.visiblePath = UIBezierPath(
             roundedRect: cell.iconImageView.bounds,
-            cornerRadius: LCSpringboardIconCell.iconCornerRadius
+            cornerRadius: LCSpringboardIconCell.iconCornerRadius(forIconSize: cell.iconImageView.bounds.width)
         )
         params.shadowPath = UIBezierPath()
         return UITargetedPreview(view: cell.iconImageView, parameters: params)

@@ -667,7 +667,12 @@ static UIDeviceOrientation LCDeviceOrientationForInterface(UIInterfaceOrientatio
     void (^updateSceneSettings)(id) = ^void(UIMutableApplicationSceneSettings *settings) {
         settings.canShowAlerts = YES;
         settings.cornerRadiusConfiguration = [[PrivClass(BSCornerRadiusConfiguration) alloc] initWithTopLeft:self.view.layer.cornerRadius bottomLeft:self.view.layer.cornerRadius bottomRight:self.view.layer.cornerRadius topRight:self.view.layer.cornerRadius];
-        settings.displayConfiguration = UIScreen.mainScreen.displayConfiguration;
+        // The display the host window is on, not the main screen. The iPhone Duo
+        // has two built-in displays, and a guest handed the other one's
+        // configuration lays itself out for a display it is not on. The main
+        // screen only stands in while the host has no window yet.
+        UIScreen *hostScreen = self.view.window.windowScene.screen ?: UIScreen.mainScreen;
+        settings.displayConfiguration = hostScreen.displayConfiguration;
         settings.foreground = YES;
         // Baseline geometry for a windowed scene. A maximized one is re-derived
         // by the delegate at the bottom of this block, which has the last word.
@@ -891,6 +896,13 @@ static UIDeviceOrientation LCDeviceOrientationForInterface(UIInterfaceOrientatio
                 UIDeviceOrientation guestDevice = LCDeviceOrientationForInterface(settings.interfaceOrientation);
                 // Only ever written with a real answer; unknown leaves it as it is.
                 if(guestDevice != UIDeviceOrientationUnknown) settings.deviceOrientation = guestDevice;
+            }
+            // Folding or unfolding an iPhone Duo moves the host to its other
+            // built-in display without recreating this scene, so the guest is told
+            // which display it is on now as well as how big it is.
+            id display = self.view.window.windowScene.screen.displayConfiguration;
+            if(display && ![display isEqual:settings.displayConfiguration]) {
+                settings.displayConfiguration = display;
             }
             CGRect frame = self.view.frame;
             if(!self.usesHostingControllerAPI) {

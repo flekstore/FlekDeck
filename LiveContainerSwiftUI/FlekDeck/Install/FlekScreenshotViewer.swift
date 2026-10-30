@@ -38,6 +38,7 @@ struct FlekScreenshotViewer: View {
     }
 
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.verticalSizeClass) private var verticalSizeClass
     /// Room the multitask bar's chin takes along the bottom of the screen.
     ///
     /// The viewer is a full-screen cover — its own controller, which doesn't
@@ -99,10 +100,13 @@ struct FlekScreenshotViewer: View {
             .compactMap { $0 as? UIWindowScene }
             .first { $0.activationState == .foregroundActive }
             ?? (UIApplication.shared.connectedScenes.first as? UIWindowScene)
-        // Same rule as the dock's: on iPhone the bar moves to the right edge in
-        // landscape, where it takes nothing from the bottom. On iPad it stays put.
+        // Same rule as the dock's: when the height is short — an iPhone or the
+        // iPhone Duo's cover display in landscape — the bar moves to a side edge,
+        // where it takes nothing from the bottom. On iPad, and on the unfolded
+        // Duo, it stays put.
         let onSideEdge = (scene?.interfaceOrientation.isLandscape ?? false)
-            && UIDevice.current.userInterfaceIdiom != .pad
+            && scene?.traitCollection.userInterfaceIdiom != .pad
+            && scene?.traitCollection.verticalSizeClass == .compact
         guard manager.isVisible, manager.isSwitcherBarVisible, !onSideEdge else {
             barInset = 0
             return
@@ -158,6 +162,9 @@ struct FlekScreenshotViewer: View {
             guard UIDevice.current.orientation.isValidInterfaceOrientation else { return }
             updateBarInset()
         }
+        // Folding or unfolding an iPhone Duo moves the bar without turning the
+        // device.
+        .onChange(of: verticalSizeClass) { _ in updateBarInset() }
     }
 
     private var closeButton: some View {

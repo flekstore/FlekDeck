@@ -223,7 +223,11 @@ class SceneDelegate: NSObject, UIWindowSceneDelegate, ObservableObject { // Make
         if newOptions == nil {
             newOptions = UIScene.ActivationRequestOptions()
         }
-        newOptions!._setRequestFullscreen(UIScreen.main.bounds == self.keyWindow!.bounds)
+        // Full screen if the key window fills the display it is on — that one's
+        // bounds, not the main screen's, which on a device with two built-in
+        // displays can be the one the window is not on.
+        let keyWindow = self.keyWindow!
+        newOptions!._setRequestFullscreen(keyWindow.windowScene?.screen.bounds == keyWindow.bounds)
         self.hook_requestSceneSessionActivation(sceneSession, userActivity: userActivity, options: newOptions, errorHandler: errorHandler)
     }
     

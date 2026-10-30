@@ -246,7 +246,7 @@ class AppInfoProvider {
     /// orientation gave them, which on iPad left a landscape-shaped card sitting in
     /// a portrait window, clipped and off-centre. iPhone turns the window portrait
     /// before the switcher opens and holds it, so this never changes there.
-    @Published private(set) var switcherScreenSize: CGSize = UIScreen.main.bounds.size
+    @Published private(set) var switcherScreenSize: CGSize = FlekTheme.screen.bounds.size
 
     /// Points the overlay at the window's current shape: the box it is laid out in,
     /// and the size its cards measure themselves against.
@@ -557,11 +557,12 @@ class AppInfoProvider {
             : Constants.barHeightWithLedge
     }
 
-    /// The device's physical screen corner radius (private UIScreen value) so the
-    /// bar's concave corners match the phone's rounded screen corners. Falls back
-    /// to a sensible default on devices that report none.
+    /// The physical corner radius of the display the bar is on (private UIScreen
+    /// value) so the bar's concave corners match the phone's rounded screen
+    /// corners. Falls back to a sensible default on devices that report none.
     var deviceScreenCornerRadius: CGFloat {
-        let r = (UIScreen.main.value(forKey: "_displayCornerRadius") as? CGFloat) ?? 0
+        let screen = keyWindow?.windowScene?.screen ?? FlekTheme.screen
+        let r = (screen.value(forKey: "_displayCornerRadius") as? CGFloat) ?? 0
         return r > 0 ? r : 39
     }
 
@@ -804,7 +805,7 @@ class AppInfoProvider {
     /// display in Split View or Slide Over, and `UIScreen` would still report the
     /// whole panel.
     @Published private(set) var cachedWindowShortEdge: CGFloat =
-        min(UIScreen.main.bounds.width, UIScreen.main.bounds.height)
+        min(FlekTheme.screen.bounds.width, FlekTheme.screen.bounds.height)
 
     func refreshCachedWindowShortEdge() {
         guard let bounds = keyWindow?.bounds, bounds.width > 0, bounds.height > 0 else { return }
@@ -888,7 +889,7 @@ class AppInfoProvider {
         for case let bounds? in candidates where bounds.width > 0 && bounds.height > 0 {
             return bounds
         }
-        return UIScreen.main.bounds
+        return FlekTheme.screen.bounds
     }
 
     /// The bar's space as the user sees it — the layout's own rectangle, turned if
@@ -940,9 +941,17 @@ class AppInfoProvider {
         //   turned anticlockwise  → interface .landscapeRight → chin right
         //
         // iPad has no housing to avoid and keeps the bottom, as it always has.
-        guard UIDevice.current.userInterfaceIdiom != .pad else { return .bottom }
-        let scene = hostingController?.view.window?.windowScene ?? keyWindow?.windowScene
-        switch resolvedInterfaceOrientation(scene) {
+        //
+        // So does any display tall enough to spare the bar's height the other way
+        // up. The bar only leaves the bottom when the height is what is short: an
+        // iPhone on its side, or the iPhone Duo's cover display. The Duo unfolded is
+        // a tablet-sized display on a phone, and keeps the bottom the way iPad does.
+        // Read off the bar's own window, which is the scene the bar is drawn in.
+        let window = hostingController?.view.window ?? keyWindow
+        guard let traits = window?.traitCollection,
+              traits.userInterfaceIdiom != .pad,
+              traits.verticalSizeClass == .compact else { return .bottom }
+        switch resolvedInterfaceOrientation(window?.windowScene) {
         case .landscapeLeft:  return .left
         case .landscapeRight: return .right
         default:              return .bottom
@@ -2349,7 +2358,7 @@ class AppInfoProvider {
         let area = bounds ?? host.bounds
         guard area.width > 0, area.height > 0 else { return }
         let inset = max(host.safeAreaInsets.bottom, safeAreaInsets.bottom)
-        let screen = UIScreen.main.bounds
+        let screen = (host.window?.windowScene?.screen ?? FlekTheme.screen).bounds
         let size = MultitaskSwipeZone.preferredSize(forShortSide: min(screen.width, screen.height))
         // Down from the top of the safe-area band by `bandIntrusion`, which is as far
         // towards the real indicator as the touches still arrive over a guest.
@@ -6094,7 +6103,7 @@ struct AppSwitcherCard: View {
                         UIImpactFeedbackGenerator(style: .medium).impactOccurred()
                         
                         // Spring with initial velocity for smooth momentum handoff from gesture
-                        let screenH = UIScreen.main.bounds.height
+                        let screenH = dockManager.switcherScreenSize.height
                         let totalChange = -screenH - dragOffset // negative (going further up)
                         // Normalize gesture velocity to proportion of remaining distance per second
                         let springVelocity = totalChange != 0 ? velocity / totalChange : 0
@@ -6143,7 +6152,7 @@ struct AppSwitcherCard: View {
         .onChange(of: dockManager.isClosingAll) { closing in
             if closing {
                 withAnimation(.easeIn(duration: 0.3).delay(Double(cardIndex) * 0.05)) {
-                    closeAllOffset = -UIScreen.main.bounds.height
+                    closeAllOffset = -dockManager.switcherScreenSize.height
                 }
             } else if closeAllOffset != 0 {
                 // Closing all clears the flag once the sweep is done, but it only

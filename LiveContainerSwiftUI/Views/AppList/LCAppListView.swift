@@ -1133,7 +1133,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
     /// has in front of it. Pages the stored sizes say nothing about are this big.
     private var homeItemsPerPage: Int {
         // Mirrors LCSpringboardViewController.recalculateItemsPerPage
-        let screenBounds = UIScreen.main.bounds
+        let screenBounds = FlekTheme.screen.bounds
         let safeArea = UIApplication.shared.connectedScenes
             .compactMap { ($0 as? UIWindowScene)?.windows.first?.safeAreaInsets }
             .first ?? UIEdgeInsets(top: 59, left: 0, bottom: 34, right: 0)
