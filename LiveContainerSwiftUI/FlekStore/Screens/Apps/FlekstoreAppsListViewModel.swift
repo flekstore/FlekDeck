@@ -174,6 +174,7 @@ class FlekstoreAppsListViewModel: ObservableObject {
         let generation = loadGeneration
         currentPage = 0
         canLoadMore = true
+        keptAwaitingRefresh = nil
         apps = []
         isLoading = false   // a stale in-flight page load must not block this reset
         await fetchApps(generation: generation)
@@ -282,14 +283,62 @@ class FlekstoreAppsListViewModel: ObservableObject {
 
     // MARK: - Instant source switching
 
+    /// A source's list as it was last shown, with how far it had been paged.
+    private struct KeptList {
+        let apps: [FSAppModel]
+        let currentPage: Int
+        let canLoadMore: Bool
+    }
+
     /// In-memory cache of the last-shown apps per source, so switching back to a
     /// source shows its list instantly instead of reloading from scratch.
-    private var memoryCache: [String: [FSAppModel]] = [:]
+    private var memoryCache: [String: KeptList] = [:]
+
+    /// The kept list on screen while the refresh that is to replace it is on
+    /// its way. Paging is held off until it lands, so this is where paging
+    /// really stands, should the source be left or the refresh fail.
+    private var keptAwaitingRefresh: KeptList?
 
     /// Whether the source's last-shown list is held in memory.
     func hasMemoryCache(for source: RepositorySource) -> Bool {
         memoryCache[repoCacheKey(source)] != nil
     }
+
+    /// The source's last-shown list, if it is held in memory.
+    func cachedApps(for source: RepositorySource) -> [FSAppModel]? {
+        memoryCache[repoCacheKey(source)]?.apps
+    }
+
+    /// Fetches FlekSt0re's first page and keeps it, where no list of it is
+    /// kept yet, so that a swipe to FlekSt0re finds a list to show rather than
+    /// loading one when it lands. Returns the list kept.
+    func keepFlekstoreFirstPage() async -> [FSAppModel]? {
+        let key = repoCacheKey(.flekstore)
+        if let kept = memoryCache[key] { return kept.apps }
+        if let fetch = firstPageFetch { return await fetch.value }
+        let fetch = Task { () -> [FSAppModel]? in
+            guard var components = URLComponents(string: "\(FlekStoreAPI.base)/app/with-link") else { return nil }
+            components.queryItems = [
+                .init(name: "filter", value: "updates"),
+                .init(name: "page", value: "0"),
+                .init(name: "search", value: "false")
+            ]
+            guard let url = components.url,
+                  let (data, _) = try? await URLSession.shared.data(from: url),
+                  let decoded = try? JSONDecoder().decode([FSAppModel].self, from: data) else { return nil }
+            return isAdult ? decoded : decoded.filter { $0.app_isAdult != 1 }
+        }
+        firstPageFetch = fetch
+        let fetched = await fetch.value
+        firstPageFetch = nil
+        // Kept meanwhile, on leaving FlekSt0re: that is the list it showed.
+        if let kept = memoryCache[key] { return kept.apps }
+        guard let fetched, !fetched.isEmpty else { return nil }
+        memoryCache[key] = KeptList(apps: fetched, currentPage: 1, canLoadMore: true)
+        return fetched
+    }
+
+    private var firstPageFetch: Task<[FSAppModel]?, Never>?
 
     private func repoCacheKey(_ source: RepositorySource) -> String {
         switch source {
@@ -302,11 +351,37 @@ class FlekstoreAppsListViewModel: ObservableObject {
     /// the provided disk cache), refreshing in the background. Only falls back to
     /// an empty loading state when there is nothing cached to show.
     func switchRepository(to source: RepositorySource, diskPreloaded: [FSAppModel]? = nil) async {
-        // Save the outgoing list. For FlekStore, only cache the default
-        // (uncategorised) view so we never restore a category-filtered list.
+        let shown = showRepository(source, preloaded: diskPreloaded)
+        await loadShownRepository(shown)
+    }
+
+    /// A source put on screen by `showRepository`, for `loadShownRepository`
+    /// to bring up to date.
+    struct ShownRepository {
+        fileprivate let generation: Int
+        fileprivate let kept: Bool
+        fileprivate let refreshes: Bool
+    }
+
+    /// The part of a switch that happens at once: `source` goes on screen with
+    /// the list kept for it, or placeholders where there is none. Nothing is
+    /// fetched until `loadShownRepository`.
+    ///
+    /// `inPlace` is for a list that is on screen already, as the preview a
+    /// swipe between sources drew. It is taken over as it is: its rows make no
+    /// entrance, no refresh comes to change them, and paging carries on from
+    /// where it stood.
+    @discardableResult
+    func showRepository(_ source: RepositorySource, preloaded: [FSAppModel]? = nil,
+                        inPlace: Bool = false) -> ShownRepository {
+        // Save the outgoing list, and where its paging stood. For FlekStore,
+        // only cache the default (uncategorised) view so we never restore a
+        // category-filtered list.
         if !apps.isEmpty && (repository != .flekstore || selectedCategoryID == nil) {
-            memoryCache[repoCacheKey(repository)] = apps
+            memoryCache[repoCacheKey(repository)] = keptAwaitingRefresh
+                ?? KeptList(apps: apps, currentPage: currentPage, canLoadMore: canLoadMore)
         }
+        keptAwaitingRefresh = nil
 
         // A load still under way is the source being left's: it must not land
         // on the new one, nor keep it from loading.
@@ -320,16 +395,40 @@ class FlekstoreAppsListViewModel: ObservableObject {
         currentPage = 0
         canLoadMore = true
 
-        if let preloaded = memoryCache[repoCacheKey(source)] ?? diskPreloaded, !preloaded.isEmpty {
-            apps = preloaded
-            // A kept list can run to several pages: none is asked for until the
-            // refresh has said where the first one ends, or a page already
-            // shown would be added again.
-            canLoadMore = false
-            await silentRefresh(expecting: source)
-        } else {
-            apps = []
+        let kept = memoryCache[repoCacheKey(source)]
+            ?? preloaded.map { KeptList(apps: $0, currentPage: 0, canLoadMore: false) }
+        if let kept, !kept.apps.isEmpty {
+            apps = kept.apps
+            if inPlace {
+                appsStamp = 0
+                currentPage = kept.currentPage
+                canLoadMore = kept.canLoadMore
+            } else {
+                // A kept list can run to several pages: none is asked for until
+                // the refresh has said where the first one ends, or a page
+                // already shown would be added again.
+                canLoadMore = false
+                keptAwaitingRefresh = kept
+            }
+            return ShownRepository(generation: loadGeneration, kept: true, refreshes: !inPlace)
+        }
+        apps = []
+        // Placeholders from the first frame, not an empty list until the fetch
+        // begins.
+        isLoading = true
+        return ShownRepository(generation: loadGeneration, kept: false, refreshes: false)
+    }
+
+    /// Fetches the first page where `showRepository` had no list to show, and
+    /// refreshes a kept one unless it was taken over in place. Does nothing
+    /// once another source has been shown since.
+    func loadShownRepository(_ shown: ShownRepository) async {
+        guard shown.generation == loadGeneration else { return }
+        if !shown.kept {
+            isLoading = false
             await fetchApps()
+        } else if shown.refreshes {
+            await silentRefresh(expecting: repository)
         }
     }
 
@@ -339,6 +438,7 @@ class FlekstoreAppsListViewModel: ObservableObject {
         guard let baseURL = currentEndpoint() else { return }
         // A category picked, a search or another source meanwhile supersedes it.
         let generation = loadGeneration
+        let awaited = keptAwaitingRefresh
         do {
             switch source {
             case .flekstore:
@@ -356,19 +456,31 @@ class FlekstoreAppsListViewModel: ObservableObject {
                 apps = filtered
                 currentPage = filtered.isEmpty ? 0 : 1
                 canLoadMore = !filtered.isEmpty
-                if !filtered.isEmpty { memoryCache[repoCacheKey(source)] = filtered }
+                keptAwaitingRefresh = nil
+                // Only the uncategorised list is kept, as on leaving the source.
+                if !filtered.isEmpty && selectedCategoryID == nil {
+                    memoryCache[repoCacheKey(source)] = KeptList(apps: filtered, currentPage: currentPage,
+                                                                 canLoadMore: canLoadMore)
+                }
+                return
 
             case .custom(let url):
                 // The loader keeps the catalog on disk itself.
-                guard let mapped = await RepoCatalogLoader.shared.catalog(for: url),
-                      generation == loadGeneration, repository == source else { return }
-                apps = mapped
-                canLoadMore = false
-                memoryCache[repoCacheKey(source)] = mapped
+                if let mapped = await RepoCatalogLoader.shared.catalog(for: url) {
+                    guard generation == loadGeneration, repository == source else { return }
+                    apps = mapped
+                    canLoadMore = false
+                    keptAwaitingRefresh = nil
+                    memoryCache[repoCacheKey(source)] = KeptList(apps: mapped, currentPage: 0, canLoadMore: false)
+                    return
+                }
             }
-        } catch {
-            // Keep the cached list on failure.
-        }
+        } catch {}
+        // Keep the cached list on failure, and its paging where it stood.
+        guard generation == loadGeneration, let awaited else { return }
+        currentPage = awaited.currentPage
+        canLoadMore = awaited.canLoadMore
+        keptAwaitingRefresh = nil
     }
 
     func refreshSubscriptionStatus() async {

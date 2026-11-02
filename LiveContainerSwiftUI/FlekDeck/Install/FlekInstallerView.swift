@@ -66,6 +66,23 @@ struct FlekInstallerView: View {
     @State private var manageButtonWidth: CGFloat = 0
     /// Measured height of the install tray, so the app list can scroll clear of it.
     @State private var trayHeight: CGFloat = 0
+    /// How far the app list has been pulled sideways by a swipe between sources.
+    @State private var sourceSwipeOffset: CGFloat = 0
+    /// Set while a finger is swiping the list sideways.
+    @State private var sourceSwipeDragging = false
+    /// Set while a swiped-to source slides in, so a new swipe waits for it.
+    @State private var sourceSwipeSettling = false
+    /// Set from the start of a swipe until its page has come to rest, so the
+    /// sources beside it stay drawn while it springs back.
+    @State private var sourceSwipeInFlight = false
+    /// Held from the moment a drag reads as a swipe until just after it ends,
+    /// so letting go over a row doesn't also open or download that app.
+    @State private var sourceSwipeBlocksTaps = false
+    /// The catalogs of the sources either side of the one shown, by source
+    /// address, drawn beside the list while it is swiped.
+    @State private var neighbourCatalogs: [String: [FSAppModel]] = [:]
+    /// Width of the list, which a swipe is measured against.
+    @State private var contentWidth: CGFloat = 0
 
     /// The bottom bar/blur only need to make room when the switcher bar actually
     /// sits along the bottom edge — i.e. portrait. In landscape the bar is on the
@@ -145,6 +162,23 @@ struct FlekInstallerView: View {
                 // cutting. Keyed on the state itself so nothing else in the list
                 // — row inserts, pagination — gets dragged into the animation.
                 .animation(Self.crossfade, value: contentState)
+                .background(GeometryReader { geo in
+                    Color.clear
+                        .onAppear { contentWidth = geo.size.width }
+                        .onChange(of: geo.size.width) { contentWidth = $0 }
+                })
+                // The whole page answers a swipe, blank space included — the
+                // error page has little else to take hold of.
+                .contentShape(Rectangle())
+                // Swiping the list sideways moves to the previous or next source,
+                // the way pages turn elsewhere in iOS.
+                .offset(x: sourceSwipeOffset)
+                .overlay { neighbourPages }
+                .modifier(FlekSourceSwipeGesture(
+                    isEnabled: !searchActive && !viewModel.isBanned && !sourceSwipeSettling,
+                    onBegan: sourceSwipeBegan,
+                    onChanged: sourceSwipeChanged,
+                    onEnded: sourceSwipeEnded))
 
             // Top-edge blur: sits above the list but below the bars so the
             // content fades out as it scrolls up under the pill/category bar.
@@ -162,8 +196,11 @@ struct FlekInstallerView: View {
                         .padding(.horizontal, 16)
                         .padding(.top, 8)
 
-                    if viewModel.repository == .flekstore {
+                    // Swiping toward FlekSt0re, its categories come up with it.
+                    if viewModel.repository == .flekstore || swipeTargetRepo.map(Self.isFlekstore) == true {
                         categoryBar.padding(.top, 8)
+                            .opacity(categoryBarOpacity)
+                            .allowsHitTesting(viewModel.repository == .flekstore)
                     }
                 }
                 .opacity(searchActive ? 0 : 1)
@@ -187,6 +224,11 @@ struct FlekInstallerView: View {
             }
         }
         .onPreferenceChange(InstallTrayHeightKey.self) { trayHeight = $0 }
+        // A switch has gone through: the list left behind is now kept in memory,
+        // ready to be swiped back to.
+        .onChange(of: viewModel.repository) { _ in
+            loadNeighbourCatalogs()
+        }
         .onReceive(NotificationCenter.default.publisher(for: .multitaskBarVisibilityChanged)) { _ in
             // Animate the bottom bar / blur shift in sync with the switcher bar's
             // slide (same easing + duration) instead of snapping.
@@ -264,6 +306,8 @@ struct FlekInstallerView: View {
                 selectedRepoID = flekstore.id
                 Task { await switchTo(flekstore) }
             }
+            // The sources may have been reordered, so the neighbours with them.
+            loadNeighbourCatalogs()
             // Let the sheet finish dismissing and repos reload before scrolling
             // so the centering animation is actually visible in the pill.
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
@@ -407,7 +451,7 @@ struct FlekInstallerView: View {
             // to cover the status-bar strip — dropping the 50pt falloff keeps it
             // from frosting the first repository section header in the results.
             let falloff: CGFloat = searchActive ? 15 : 50
-            let total = max(geo.safeAreaInsets.top + barsBottomInset + falloff, 1)
+            let total = max(geo.safeAreaInsets.top + blurBarsInset + falloff, 1)
             // Real progressive blur: radius ramps from strong at the top edge to
             // none ~50pt below the bottom of the category bar.
             VariableBlurView(maxBlurRadius: searchActive ? 15 : 20, direction: .top)
@@ -496,6 +540,7 @@ struct FlekInstallerView: View {
             // Center the tapped repo (skip while the sources sheet is open so the
             // move plays *after* dismissal instead of behind the sheet).
             .onChange(of: selectedRepoID) { id in
+                loadNeighbourCatalogs()
                 guard let id, !showSources else { return }
                 centerSelectedRepo(id, proxy: proxy)
             }
@@ -506,6 +551,220 @@ struct FlekInstallerView: View {
                 centerSelectedRepo(id, proxy: proxy)
             }
         }
+    }
+
+    // MARK: Source swipe
+
+    /// The source whose list is on screen. Not `selectedRepoID`, which the pill
+    /// moves to as soon as a swipe is let go, before the new list is in.
+    private var shownRepoIndex: Int? {
+        repos.firstIndex(where: { Self.source(for: $0) == viewModel.repository })
+            ?? repos.firstIndex(where: { $0.id == selectedRepoID })
+    }
+
+    /// The source beside the one shown on the side a swipe moves toward:
+    /// a swipe to the left brings in the next source, to the right the previous.
+    private func neighbourRepo(swipingLeft: Bool) -> AppRepository? {
+        guard let index = shownRepoIndex else { return nil }
+        let target = swipingLeft ? index + 1 : index - 1
+        return repos.indices.contains(target) ? repos[target] : nil
+    }
+
+    /// The source the list is being swiped toward.
+    private var swipeTargetRepo: AppRepository? {
+        guard sourceSwipeOffset != 0 else { return nil }
+        return neighbourRepo(swipingLeft: sourceSwipeOffset < 0)
+    }
+
+    /// How far the swipe has gone, as a share of the page.
+    private var sourceSwipeProgress: Double {
+        min(1, abs(sourceSwipeOffset) / max(contentWidth, 1))
+    }
+
+    /// FlekSt0re's category bar fades with the swipe: out on the way to another
+    /// source, in on the way back to FlekSt0re.
+    private var categoryBarOpacity: Double {
+        guard let target = swipeTargetRepo else { return 1 }
+        let leavingFlekstore = viewModel.repository == .flekstore
+        if leavingFlekstore == Self.isFlekstore(target) { return 1 }
+        return leavingFlekstore ? 1 - sourceSwipeProgress : sourceSwipeProgress
+    }
+
+    /// The bottom of the bars as the top blur follows it: through a swipe to or
+    /// from FlekSt0re, part way between with and without its category bar.
+    private var blurBarsInset: CGFloat {
+        guard !searchActive else { return barsBottomInset }
+        let categoryBarShown = viewModel.repository == .flekstore
+            || swipeTargetRepo.map(Self.isFlekstore) == true
+        return 8 + 52 + (categoryBarShown ? (8 + 44) * categoryBarOpacity : 0)
+    }
+
+    private static func sourceKey(_ source: FlekstoreAppsListViewModel.RepositorySource) -> String {
+        switch source {
+        case .flekstore: return "flekstore"
+        case .custom(let url): return url
+        }
+    }
+
+    /// The sources either side, carried along beside the list as it is
+    /// swiped, so the next one is already there to be pulled into view.
+    @ViewBuilder
+    private var neighbourPages: some View {
+        ZStack {
+            if sourceSwipeInFlight {
+                if let previous = neighbourRepo(swipingLeft: false) {
+                    sourcePreview(previous).offset(x: sourceSwipeOffset - contentWidth)
+                }
+                if let next = neighbourRepo(swipingLeft: true) {
+                    sourcePreview(next).offset(x: sourceSwipeOffset + contentWidth)
+                }
+            }
+        }
+        .allowsHitTesting(false)
+    }
+
+    /// A source's list as it will look once it is shown.
+    private func sourcePreview(_ repo: AppRepository) -> some View {
+        let apps = neighbourCatalogs[repo.sourceURL] ?? []
+        // The category bar comes with FlekSt0re, so its list starts lower.
+        let topInset: CGFloat = 8 + 52 + (Self.isFlekstore(repo) ? 8 + 44 : 0) + 10
+        return FlekSourcePreviewPage(apps: Array(apps.prefix(Self.previewRowCount)),
+                                     topInset: topInset,
+                                     accent: Self.flekBlue,
+                                     placeholderRows: Self.skeletonRowCount)
+            .equatable()
+    }
+
+    /// Enough rows to fill a screen while a preview is in view.
+    private static let previewRowCount = 12
+
+    /// Gathers the catalogs of the sources either side of the one shown, so a
+    /// swipe has them to show from its first point of movement.
+    private func loadNeighbourCatalogs() {
+        let neighbours = [neighbourRepo(swipingLeft: false), neighbourRepo(swipingLeft: true)].compactMap { $0 }
+        let wanted = Set(neighbours.map(\.sourceURL))
+        neighbourCatalogs = neighbourCatalogs.filter { wanted.contains($0.key) }
+        for repo in neighbours {
+            let source = Self.source(for: repo)
+            if let kept = viewModel.cachedApps(for: source) {
+                neighbourCatalogs[repo.sourceURL] = kept
+            } else if case .custom(let url) = source {
+                Task {
+                    var catalog = await Task.detached(priority: .utility) {
+                        RepoCatalogCache.shared.cachedApps(for: url)
+                    }.value
+                    // Never fetched: fetched now, ahead of a swipe to it, rather
+                    // than loaded once the swipe has landed.
+                    let failedLately = await RepoCatalogLoader.shared.hasFailedRecently(url)
+                    if catalog == nil && !failedLately {
+                        catalog = await RepoCatalogLoader.shared.catalog(for: url)
+                    }
+                    if let catalog { neighbourCatalogs[url] = catalog }
+                }
+            } else {
+                // FlekSt0re, not shown yet: its first page is fetched ahead too.
+                let key = repo.sourceURL
+                Task {
+                    if let apps = await viewModel.keepFlekstoreFirstPage() { neighbourCatalogs[key] = apps }
+                }
+            }
+        }
+    }
+
+    private func sourceSwipeBegan() {
+        sourceSwipeDragging = true
+        sourceSwipeBlocksTaps = true
+        sourceSwipeInFlight = true
+    }
+
+    private func sourceSwipeChanged(_ translation: CGFloat) {
+        // With no source on that side the list only gives a little, like a
+        // scroll view pulled past its end.
+        let offset = neighbourRepo(swipingLeft: translation < 0) == nil ? rubberBand(translation) : translation
+        var transaction = Transaction()
+        transaction.disablesAnimations = true
+        withTransaction(transaction) { sourceSwipeOffset = offset }
+    }
+
+    /// `velocity` is the finger's, in points a second, as it lifted.
+    private func sourceSwipeEnded(_ translation: CGFloat, velocity: CGFloat) {
+        sourceSwipeDragging = false
+        // The row under the finger hears the lift too, right about now.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+            if !sourceSwipeDragging { sourceSwipeBlocksTaps = false }
+        }
+        let dx = sourceSwipeOffset
+        let width = max(contentWidth, 1)
+        // Flicked, or let go past halfway: the page turns. Flicking back the
+        // other way cancels it however far it went, as in iOS.
+        let swipingLeft = dx < 0
+        let flicking = abs(velocity) > 450
+        let flickedBack = flicking && (velocity < 0) != swipingLeft
+        if let repo = neighbourRepo(swipingLeft: swipingLeft), !flickedBack,
+           flicking || abs(dx) > width * 0.5 {
+            turnToSource(repo, swipingLeft: swipingLeft, width: width, speed: abs(velocity))
+        } else {
+            withAnimation(.spring(response: 0.35, dampingFraction: 0.86)) {
+                sourceSwipeOffset = 0
+            }
+            // Back at rest, unless another swipe has taken it up since.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
+                if !sourceSwipeDragging && !sourceSwipeSettling {
+                    sourceSwipeInFlight = false
+                }
+            }
+        }
+    }
+
+    /// Carries the swipe on until the new source's page fills the screen, and
+    /// there hands over from its preview to the real list, unseen.
+    private func turnToSource(_ repo: AppRepository, swipingLeft: Bool, width: CGFloat, speed: CGFloat) {
+        sourceSwipeSettling = true
+        // The pill goes ahead to the new source as the page is let go.
+        withAnimation(.spring(response: 0.42, dampingFraction: 0.82)) {
+            selectedRepoID = repo.id
+        }
+
+        let target = swipingLeft ? -width : width
+        let remaining = abs(target - sourceSwipeOffset)
+        // The curve sets off at twice its average pace and eases to a stop, so
+        // timed by the finger's speed the page leaves at that speed.
+        let duration = min(max(Double(2 * remaining / max(speed, 1)), 0.2), 0.38)
+        withAnimation(.timingCurve(0.25, 0.5, 0.5, 1, duration: duration)) {
+            sourceSwipeOffset = target
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + duration + 0.03) {
+            // The list takes the place of the preview in the same frame, with
+            // the rows the preview drew, so nothing moves or fades — and stays
+            // as it is, with no refresh coming in after to change it.
+            var transaction = Transaction()
+            transaction.disablesAnimations = true
+            var shown: FlekstoreAppsListViewModel.ShownRepository?
+            withTransaction(transaction) {
+                sourceSwipeOffset = 0
+                sourceSwipeInFlight = false
+                // A pill tapped while the page slid has the last word.
+                guard selectedRepoID == repo.id else { return }
+                if searchActive { closeSearch() }
+                Self.sessionSelectedRepoURL = repo.sourceURL
+                switchCount &+= 1
+                shown = viewModel.showRepository(Self.source(for: repo),
+                                                 preloaded: neighbourCatalogs[repo.sourceURL],
+                                                 inPlace: true)
+            }
+            sourceSwipeSettling = false
+            if let shown {
+                Task { await viewModel.loadShownRepository(shown) }
+            }
+        }
+    }
+
+    /// UIScrollView's resistance past its end: the further it is pulled, the
+    /// less it follows, never quite reaching the width.
+    private func rubberBand(_ offset: CGFloat) -> CGFloat {
+        let width = max(contentWidth, 1)
+        let pulled = (1 - 1 / (abs(offset) * 0.55 / width + 1)) * width
+        return offset < 0 ? -pulled : pulled
     }
 
     private func centerSelectedRepo(_ id: UUID, proxy: ScrollViewProxy) {
@@ -573,11 +832,13 @@ struct FlekInstallerView: View {
                             accent: Self.flekBlue,
                             installState: LCInstallQueue.shared.item(for: app.install_url)?.installState,
                             isCompleted: LCInstallQueue.shared.completedURLs.contains(app.install_url),
-                            onInstall: { install(app) },
+                            onInstall: { guard !sourceSwipeBlocksTaps else { return }; install(app) },
                             onCancel: {
+                                guard !sourceSwipeBlocksTaps else { return }
                                 LCInstallQueue.shared.cancel(url: app.install_url)
                             },
                             onOpen: {
+                                guard !sourceSwipeBlocksTaps else { return }
                                 detailTarget = DetailTarget(app: app,
                                                             isFlekstore: viewModel.repository == .flekstore)
                             }
@@ -610,6 +871,7 @@ struct FlekInstallerView: View {
                     .allowsHitTesting(false)
             }
             .refreshable { await refreshCatalog() }
+            .id(Self.sourceKey(viewModel.repository))
         }
     }
 
@@ -1152,7 +1414,15 @@ private struct FlekRowEntrance: ViewModifier {
     let batchStamp: TimeInterval
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @State private var shown = false
+    @State private var shown: Bool
+
+    init(index: Int, batchStamp: TimeInterval) {
+        self.index = index
+        self.batchStamp = batchStamp
+        // A row of a batch that is no longer fresh starts in place, rather than
+        // drawing one frame at the start of an entrance it then skips.
+        _shown = State(initialValue: CACurrentMediaTime() - batchStamp >= Self.batchWindow)
+    }
 
     /// Rows arriving within this long of their batch are treated as part of it.
     private static let batchWindow: TimeInterval = 0.4
@@ -1180,6 +1450,185 @@ private struct FlekRowEntrance: ViewModifier {
                     shown = true
                 }
             }
+    }
+}
+
+/// Reads a sideways drag on the Installer's list as a swipe between sources.
+///
+/// From iOS 18 a UIKit pan, which starts only on a drag that sets off sideways:
+/// any other drag — the list's scroll, pull-to-refresh with it — is left to the
+/// list as if the swipe were not there. Once started, it holds the list still
+/// and takes the touch from the row under the finger, as a paged scroll view
+/// does. Earlier, a drag gesture alongside the list's own, which keeps its
+/// reading of a drag it leaves alone out of view state, so that such a drag
+/// changes nothing on screen.
+private struct FlekSourceSwipeGesture: ViewModifier {
+    var isEnabled: Bool
+    var onBegan: () -> Void
+    /// How far the finger has gone sideways since the swipe started.
+    var onChanged: (CGFloat) -> Void
+    /// How far it went, and its speed, in points a second, as it lifted.
+    var onEnded: (CGFloat, _ velocity: CGFloat) -> Void
+
+    @State private var drag = FlekSourceSwipeDrag()
+
+    func body(content: Content) -> some View {
+        if #available(iOS 18.0, *) {
+            content.gesture(FlekSourceSwipeRecognizer(isEnabled: isEnabled, onBegan: onBegan,
+                                                      onChanged: onChanged, onEnded: onEnded))
+        } else {
+            content.simultaneousGesture(dragGesture, including: isEnabled ? .all : .subviews)
+        }
+    }
+
+    private var dragGesture: some Gesture {
+        DragGesture(minimumDistance: 12, coordinateSpace: .global)
+            .onChanged { value in
+                let dx = value.translation.width, dy = value.translation.height
+                // Read once, from the first stretch of movement: a mostly
+                // sideways one is a swipe, anything else the list's own scroll.
+                if drag.isSideways == nil {
+                    drag.isSideways = abs(dx) > abs(dy) * 1.4
+                    guard drag.isSideways == true else { return }
+                    drag.origin = dx
+                    drag.sample = nil
+                    drag.speed = 0
+                    onBegan()
+                }
+                guard drag.isSideways == true else { return }
+                let translation = dx - drag.origin
+                if let last = drag.sample {
+                    let elapsed = value.time.timeIntervalSince(last.time)
+                    if elapsed > 0.004 {
+                        drag.speed = drag.speed * 0.3 + (translation - last.translation) / elapsed * 0.7
+                    }
+                }
+                drag.sample = (translation, value.time)
+                onChanged(translation)
+            }
+            .onEnded { value in
+                defer { drag.isSideways = nil }
+                guard drag.isSideways == true else { return }
+                // A finger that came to rest before lifting has no speed left.
+                let resting = drag.sample.map { value.time.timeIntervalSince($0.time) > 0.06 } ?? true
+                var speed = resting ? 0 : drag.speed
+                // A flick too quick to be sampled shows in where SwiftUI expects
+                // the drag to have carried on to.
+                let carriedOn = value.predictedEndTranslation.width - value.translation.width
+                if abs(speed) < 450 && abs(carriedOn) > 120 { speed = carriedOn * 4 }
+                onEnded(value.translation.width - drag.origin, speed)
+            }
+    }
+}
+
+/// The drag gesture's reading of the drag under way, kept in a reference so
+/// that updating it is not a change of view state.
+private final class FlekSourceSwipeDrag {
+    var isSideways: Bool?
+    var origin: CGFloat = 0
+    var sample: (translation: CGFloat, time: Date)?
+    var speed: CGFloat = 0
+}
+
+@available(iOS 18.0, *)
+private struct FlekSourceSwipeRecognizer: UIGestureRecognizerRepresentable {
+    var isEnabled: Bool
+    var onBegan: () -> Void
+    var onChanged: (CGFloat) -> Void
+    var onEnded: (CGFloat, _ velocity: CGFloat) -> Void
+
+    func makeCoordinator(converter: CoordinateSpaceConverter) -> Coordinator {
+        Coordinator()
+    }
+
+    func makeUIGestureRecognizer(context: Context) -> UIPanGestureRecognizer {
+        let pan = UIPanGestureRecognizer()
+        pan.maximumNumberOfTouches = 1
+        pan.delegate = context.coordinator
+        return pan
+    }
+
+    func updateUIGestureRecognizer(_ recognizer: UIPanGestureRecognizer, context: Context) {
+        recognizer.isEnabled = isEnabled
+    }
+
+    func handleUIGestureRecognizerAction(_ recognizer: UIPanGestureRecognizer, context: Context) {
+        // Global, not local: the list being swiped moves with the finger.
+        let translation = context.converter.translation(in: .global)?.x ?? 0
+        switch recognizer.state {
+        case .began:
+            // Measured from where it set off, so the page starts from where it
+            // stood rather than jumping the distance it took to tell.
+            context.coordinator.origin = translation
+            onBegan()
+            onChanged(0)
+        case .changed:
+            onChanged(translation - context.coordinator.origin)
+        case .ended:
+            onEnded(translation - context.coordinator.origin,
+                    context.converter.velocity(in: .global)?.x ?? 0)
+        case .cancelled, .failed:
+            onEnded(translation - context.coordinator.origin, 0)
+        default:
+            break
+        }
+    }
+
+    final class Coordinator: NSObject, UIGestureRecognizerDelegate {
+        var origin: CGFloat = 0
+
+        /// Sideways only. A drag that sets off any other way fails the pan at
+        /// once and is the list's alone.
+        func gestureRecognizerShouldBegin(_ recognizer: UIGestureRecognizer) -> Bool {
+            guard let pan = recognizer as? UIPanGestureRecognizer else { return false }
+            let movement = pan.translation(in: pan.view)
+            return abs(movement.x) > abs(movement.y) * 1.2
+        }
+    }
+}
+
+/// A source's list as it will look once it is shown, for a swipe to carry in
+/// beside the list: the top of its catalog, or placeholders where none has
+/// been fetched yet. Drawn row for row as the list draws it, so the list can
+/// take its place unseen, and equatable on what it draws, so the frames of a
+/// swipe move it without building it again.
+private struct FlekSourcePreviewPage: View, Equatable {
+    let apps: [FSAppModel]
+    let topInset: CGFloat
+    let accent: Color
+    let placeholderRows: Int
+
+    var body: some View {
+        // The page is the size of the list, with the rows hung from its top: a
+        // screenful and more, they run on below it as the list's do. Framed
+        // instead, the rows would be centred on the page, starting above it.
+        // Each row is as tall as it is in the list, where the scroll view
+        // leaves its height open, rather than squeezed to share the page —
+        // a description given two lines there would be cut to one here.
+        Color.clear.overlay(alignment: .top) {
+            VStack(spacing: 8) {
+                if apps.isEmpty {
+                    ForEach(0 ..< placeholderRows, id: \.self) { index in
+                        FlekInstallerSkeletonRow(seed: index)
+                    }
+                } else {
+                    ForEach(apps) { app in
+                        FlekInstallerRow(
+                            app: app,
+                            accent: accent,
+                            installState: LCInstallQueue.shared.item(for: app.install_url)?.installState,
+                            isCompleted: LCInstallQueue.shared.completedURLs.contains(app.install_url),
+                            onInstall: {},
+                            onCancel: {},
+                            onOpen: {}
+                        )
+                    }
+                }
+            }
+            .fixedSize(horizontal: false, vertical: true)
+            .padding(.horizontal, 16)
+            .padding(.top, topInset)
+        }
     }
 }
 
