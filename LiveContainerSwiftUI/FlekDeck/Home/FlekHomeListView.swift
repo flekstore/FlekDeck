@@ -87,6 +87,17 @@ struct FlekHomeListView<Menu: View>: View {
             // *behind* them instead of stopping short at their edges.
             .padding(.top, geo.safeAreaInsets.top + 16)
             .padding(.bottom, geo.safeAreaInsets.bottom + (barOnSide ? 16 : 89))
+            // A tap on the empty space around the rows ends edit mode, as on
+            // SpringBoard. Sits behind the rows, so their own taps go first.
+            .frame(maxWidth: .infinity,
+                   minHeight: geo.size.height + geo.safeAreaInsets.top + geo.safeAreaInsets.bottom,
+                   alignment: .top)
+            .background {
+                Color.clear
+                    .contentShape(Rectangle())
+                    .onTapGesture { isEditing = false }
+                    .allowsHitTesting(isEditing)
+            }
         }
         .ignoresSafeArea(edges: [.top, .bottom])
         }
