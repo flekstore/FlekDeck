@@ -89,10 +89,15 @@ static void *kBackdropObservationContext = &kBackdropObservationContext;
     [self updateBackdropVisibility];
 }
 
+- (void)setBackdropHeldForQuickSwitch:(BOOL)backdropHeldForQuickSwitch {
+    _backdropHeldForQuickSwitch = backdropHeldForQuickSwitch;
+    [self updateBackdropVisibility];
+}
+
 - (void)updateBackdropVisibility {
-    if(self.backdropSuspended) {
-        // A window is on its way into or out of an icon; what is behind it should
-        // be the home screen it is travelling across, not a black field.
+    if(self.backdropSuspended || self.backdropHeldForQuickSwitch) {
+        // A window is on its way into or out of an icon, or being swiped aside;
+        // what is behind it should be the home screen, not a black field.
         _backdropView.hidden = YES;
         return;
     }
@@ -178,6 +183,11 @@ static BOOL LCRotationIsLocked(void) {
         return nil;
     } else {
         self.shouldForwardTapAction = YES;
+        // A finger on an app is that app in use, which ends a run of swipes along
+        // the bar: the next swipe starts from the apps' order as it then is.
+        if(hitView && event.type == UIEventTypeTouches) {
+            [MultitaskDockManager.shared quickSwitchWindowTouched];
+        }
         return hitView;
     }
 }

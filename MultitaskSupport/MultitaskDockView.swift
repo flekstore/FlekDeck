@@ -9,6 +9,7 @@ import Foundation
 import SwiftUI
 import UIKit
 import Combine
+import CoreImage
 
 extension NSNotification.Name {
     static let multitaskBarVisibilityChanged = NSNotification.Name("MultitaskBarVisibilityChanged")
@@ -196,7 +197,11 @@ class AppInfoProvider {
         didSet { floatWindowLeavingStage(oldValue); updatePiPArming() }
     }
     @Published var isHomeState: Bool = false {
-        didSet { if isHomeState { floatWindowLeavingStage(frontmostAppUUID) }; updatePiPArming() }
+        didSet {
+            if isHomeState { floatWindowLeavingStage(frontmostAppUUID) }
+            updatePiPArming()
+            quickSwitchHomeStateChanged()
+        }
     }
     /// Where each running app's icon sits in the home dock, in window
     /// coordinates, keyed by its home-screen item id. Written by the icons
@@ -225,6 +230,14 @@ class AppInfoProvider {
     /// from the placeholders so the report and the placeholder can arrive in
     /// either order without one being lost.
     private var windowsWithContent: Set<ObjectIdentifier> = []
+    /// Where a run of swipes along the bar's app button stands. See
+    /// `quickSwitchBegan`.
+    private let quickSwitch = MultitaskQuickSwitch()
+    /// The app a swipe along the bar is landing on, which the bar's app button
+    /// names from the moment the finger lets go rather than once the window has
+    /// settled, and which way the swipe went, for the name to go the same way.
+    @Published private(set) var quickSwitchLanding: String?
+    @Published private(set) var quickSwitchLandingSide: CGFloat?
     @Published var isAppSwitcherOpen: Bool = false
     /// The interface orientation the switcher overrode, restored when it closes.
     private var orientationBeforeSwitcher: UIInterfaceOrientation?
@@ -856,6 +869,19 @@ class AppInfoProvider {
         return min(ideal, barMenuBudget)
     }
 
+    /// What the icon and name take of `barMenuWidth`: their own width, or the
+    /// room left beside the padding and the chevron, whichever is less. Held to
+    /// it, a name leaving on a switch does not keep its room while it goes.
+    public var barMenuNameWidth: CGFloat {
+        let textWidth = (frontmostAppName() as NSString).size(withAttributes: [
+            .font: UIFont.systemFont(ofSize: 14, weight: .medium)
+        ]).width
+        let own = Constants.barMenuIconSize + Constants.barMenuSpacing + ceil(textWidth)
+        let room = barMenuWidth - Constants.barMenuHPadding * 2
+            - Constants.barMenuSpacing - Constants.barMenuChevronWidth
+        return max(0, min(own, room))
+    }
+
     /// The visible solid strip of the bar (below the concave corners). Floored to
     /// the button height so the buttons are always covered: portrait gets button
     /// room from its ~34pt home-indicator inset, but landscape has none — and with a
@@ -1110,7 +1136,8 @@ class AppInfoProvider {
     }
     
     private func frontmostAppName() -> String {
-        if let uuid = frontmostAppUUID, let app = apps.first(where: { $0.appUUID == uuid }) {
+        if let uuid = quickSwitchLanding ?? frontmostAppUUID,
+           let app = apps.first(where: { $0.appUUID == uuid }) {
             return app.appName
         }
         return apps.last?.appName ?? "App"
@@ -2906,6 +2933,9 @@ class AppInfoProvider {
         let wasHomeState = isHomeState
         isHomeState = false
         frontmostAppUUID = uuid
+        // However it got here, a run of swipes along the bar is over. A swipe
+        // that landed here starts its run again once this is done.
+        quickSwitch.isLive = false
         // Move app to end so it's most recent (for home screen icon ordering)
         if let idx = apps.firstIndex(where: { $0.appUUID == uuid }) {
             let app = apps.remove(at: idx)
@@ -3449,10 +3479,23 @@ class AppInfoProvider {
     /// app-window host hidden; `isHidden` is honoured by layer rendering without a
     /// screen update, so hiding + restoring in place causes no flicker.
     func captureSpringboardSnapshot() {
+        // Blurred behind the cards anyway — render at 1x, not full retina.
+        guard let image = renderSpringboard(scale: 1) else { return }
+        springboardSnapshot = image
+    }
+
+    /// The springboard drawn without the app windows over it, `scale` pixels to
+    /// the point.
+    func renderSpringboard(scale: CGFloat) -> UIImage? {
         guard let rootView = keyWindow?.rootViewController?.view,
-              rootView.bounds.width > 0, rootView.bounds.height > 0 else { return }
+              rootView.bounds.width > 0, rootView.bounds.height > 0 else { return nil }
         let wasHidden = windowHostingView.isHidden
         windowHostingView.isHidden = true
+        // Nor the quick switch's blurred copy of it, laid between the two while
+        // a swipe is under way.
+        let switchCopy = quickSwitch.springboard?.view
+        let switchCopyWasHidden = switchCopy?.isHidden ?? false
+        switchCopy?.isHidden = true
 
         // UIVisualEffectView blurs (the list rows' .ultraThinMaterial glass, the
         // bottom variable blur, glass controls) are extremely slow to rasterize
@@ -3474,16 +3517,16 @@ class AppInfoProvider {
 
         let format = UIGraphicsImageRendererFormat.default()
         format.opaque = true
-        // Blurred behind the cards anyway — render at 1x, not full retina.
-        format.scale = 1
+        format.scale = scale
         let renderer = UIGraphicsImageRenderer(bounds: rootView.bounds, format: format)
         let image = renderer.image { ctx in
             rootView.layer.render(in: ctx.cgContext)
         }
 
         for v in hiddenEffectViews { v.isHidden = false }
+        switchCopy?.isHidden = switchCopyWasHidden
         windowHostingView.isHidden = wasHidden
-        springboardSnapshot = image
+        return image
     }
 
     func captureSnapshots() {
@@ -4516,6 +4559,7 @@ struct SwitcherBarContentView: View {
                     .stableBarGlass(capsule: true)
             }
             .accessibilityLabel("App Switcher")
+            .modifier(QuickSwitchSwipe())
 
             // Right: Home button
             BarControlButton {
@@ -4563,16 +4607,65 @@ struct SwitcherBarContentView: View {
 @available(iOS 16.0, *)
 struct FrontmostAppIconLabel: View {
     @EnvironmentObject var dockManager: MultitaskDockManager
-    @State private var appIcon: UIImage?
-    @AppStorage("darkModeIcon", store: LCUtils.appGroupUserDefault) var darkModeIcon = false
-    
+    @Environment(\.layoutDirection) private var layoutDirection
+
     private var frontmostApp: DockAppModel? {
-        if let uuid = dockManager.frontmostAppUUID {
+        if let uuid = dockManager.quickSwitchLanding ?? dockManager.frontmostAppUUID {
             return dockManager.apps.first { $0.appUUID == uuid }
         }
         return dockManager.apps.last
     }
-    
+
+    var body: some View {
+        HStack(spacing: MultitaskDockManager.Constants.barMenuSpacing) {
+            // Icon and name as one per app, so a switch along the bar carries this
+            // app's out the way its window went and the next one's in. Held to the
+            // incoming app's width rather than sized by both, so nothing shifts
+            // once the outgoing one has gone; it is cut off at the edges as it goes.
+            ZStack {
+                AppIconAndName(app: frontmostApp)
+                    .id(frontmostApp?.appUUID)
+                    .transition(dockManager.barAppTransition(layoutDirection))
+            }
+            .frame(width: dockManager.barMenuNameWidth)
+            .clipped()
+
+            Image(systemName: "chevron.up")
+                .foregroundColor(.white.opacity(0.6))
+                .font(.system(size: 10, weight: .semibold))
+                .frame(width: MultitaskDockManager.Constants.barMenuChevronWidth)
+        }
+        .padding(.horizontal, MultitaskDockManager.Constants.barMenuHPadding)
+        // Sized by the manager, not by this layout: the switcher's Close all has
+        // to agree with it, and a capsule that sized itself to its contents would
+        // stretch to fill the row's slack instead of stopping at its cap.
+        .frame(width: dockManager.barMenuWidth,
+               height: MultitaskDockManager.Constants.barButtonSize)
+        // The width belongs to whichever app is frontmost, so it changes on every
+        // switch. Glide between the two rather than snapping, the way iOS resizes
+        // its own pill controls.
+        .animation(.spring(response: 0.3, dampingFraction: 0.9),
+                   value: dockManager.barMenuWidth)
+    }
+}
+
+/// One app's icon and name on the bar's app button. A view of its own, with its
+/// own icon, so the one a switch carries out keeps its app's icon as it goes.
+@available(iOS 16.0, *)
+private struct AppIconAndName: View {
+    let app: DockAppModel?
+    @State private var appIcon: UIImage?
+    @AppStorage("darkModeIcon", store: LCUtils.appGroupUserDefault) var darkModeIcon = false
+
+    init(app: DockAppModel?) {
+        self.app = app
+        // From the cache where it is there, so an app coming in on a swipe
+        // arrives with its icon already on.
+        _appIcon = State(initialValue: app.flatMap {
+            IconCacheManager.shared.getIcon(for: "\($0.appName)_\($0.appUUID)")
+        })
+    }
+
     var body: some View {
         HStack(spacing: MultitaskDockManager.Constants.barMenuSpacing) {
             if let icon = appIcon {
@@ -4593,36 +4686,18 @@ struct FrontmostAppIconLabel: View {
             // The capsule grows to fit this up to `barMenuMaxWidth`. Past that it
             // stops, and the name is what gives way: it shrinks first, and only
             // truncates once there is nothing left to shrink.
-            Text(frontmostApp?.appName ?? "App")
+            Text(app?.appName ?? "App")
                 .foregroundColor(.white)
                 .font(.system(size: 14, weight: .medium))
                 .lineLimit(1)
                 .minimumScaleFactor(0.7)
                 .truncationMode(.tail)
-            
-            Image(systemName: "chevron.up")
-                .foregroundColor(.white.opacity(0.6))
-                .font(.system(size: 10, weight: .semibold))
-                .frame(width: MultitaskDockManager.Constants.barMenuChevronWidth)
         }
-        .padding(.horizontal, MultitaskDockManager.Constants.barMenuHPadding)
-        // Sized by the manager, not by this layout: the switcher's Close all has
-        // to agree with it, and a capsule that sized itself to its contents would
-        // stretch to fill the row's slack instead of stopping at its cap.
-        .frame(width: dockManager.barMenuWidth,
-               height: MultitaskDockManager.Constants.barButtonSize)
-        // The width belongs to whichever app is frontmost, so it changes on every
-        // switch. Glide between the two rather than snapping, the way iOS resizes
-        // its own pill controls.
-        .animation(.spring(response: 0.3, dampingFraction: 0.9),
-                   value: dockManager.barMenuWidth)
         .onAppear { loadIcon() }
-        .onChange(of: dockManager.frontmostAppUUID) { _ in loadIcon() }
-        .onChange(of: dockManager.apps.count) { _ in loadIcon() }
     }
-    
+
     private func loadIcon() {
-        guard let app = frontmostApp else {
+        guard let app else {
             appIcon = nil
             return
         }
@@ -6625,4 +6700,690 @@ struct LoadingIconView: View {
                 .scaleEffect(1.2)
         }
     }
+}
+
+// MARK: - Quick Switch
+
+/// Where a run of swipes along the bar's app button stands.
+final class MultitaskQuickSwitch {
+    /// The running apps, most recent first, as the run's first swipe found them:
+    /// the order every swipe of the run walks.
+    var order: [String] = []
+    /// Where in `order` the app in front stands.
+    var index = 0
+    /// Whether the run is still on: the app it last landed on is in front and
+    /// has not been used yet. A finger on that app, or an app brought in front
+    /// any other way, ends it, and the next swipe starts a run from the order
+    /// as it then is.
+    var isLive = false
+    /// The swipe under way.
+    var drag: Drag?
+    /// A swipe let go of, its windows still sliding the rest of the way.
+    var settling: Settle?
+    /// Under the windows from the start of a swipe until they have settled.
+    var springboard: BlurredSpringboard?
+    /// The picture it shows, and the size of screen it was drawn for. Drawn a
+    /// moment after the springboard is covered, so the first swipe finds it
+    /// ready, and dropped when the springboard is back in view.
+    var springboardImage: UIImage?
+    var springboardImageSize: CGSize = .zero
+    var springboardImageWork: DispatchWorkItem?
+
+    /// The springboard under the windows, blurred and dimmed the way the switcher
+    /// shows it, standing in for the black behind them and for the windows
+    /// further back: past the last app, the window in front gives a little and
+    /// uncovers the springboard rather than another app.
+    ///
+    /// A picture blurred ahead of time rather than a blur laid live over the
+    /// springboard, which came up a beat after the swipe began and showed the
+    /// icons sharp for that beat.
+    final class BlurredSpringboard {
+        let view = UIView()
+        let imageView = UIImageView()
+        /// Dims the picture, and goes all the way to black as it is taken away,
+        /// so that handing back to the black backdrop goes unseen.
+        let scrim = UIView()
+        /// The windows behind the one in front, hidden for the swipe, and how
+        /// opaque each was before.
+        var fadedWindows: [(view: UIView, alpha: CGFloat)] = []
+        /// Counts the times it is brought up, so a fade taking it away leaves it
+        /// be if the next swipe brought it back before the fade ended.
+        var generation = 0
+
+        init(frame: CGRect) {
+            view.frame = frame
+            view.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+            view.isUserInteractionEnabled = false
+            view.backgroundColor = .black
+            view.clipsToBounds = true
+            imageView.frame = view.bounds
+            imageView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+            imageView.contentMode = .scaleAspectFill
+            view.addSubview(imageView)
+            scrim.frame = view.bounds
+            scrim.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+            scrim.backgroundColor = .black
+            view.addSubview(scrim)
+        }
+    }
+
+    /// A window's corners as they were before a swipe rounded them, put back as
+    /// it comes to rest. A guest window clips to its bounds already; a built-in
+    /// page doesn't.
+    struct Corners {
+        let masksToBounds: Bool
+        let curve: CALayerCornerCurve
+
+        /// Rounds `layer`'s corners to `radius`, on the curve the screen's own
+        /// corners follow, and returns how it was.
+        static func clip(_ layer: CALayer, radius: CGFloat) -> Corners {
+            let was = Corners(masksToBounds: layer.masksToBounds, curve: layer.cornerCurve)
+            layer.masksToBounds = true
+            layer.cornerCurve = .continuous
+            layer.cornerRadius = radius
+            return was
+        }
+
+        /// Square-cornered again, the way a window rests.
+        func restore(_ layer: CALayer) {
+            layer.cornerRadius = 0
+            layer.masksToBounds = masksToBounds
+            layer.cornerCurve = curve
+        }
+    }
+
+    final class Drag {
+        let current: UIView
+        /// Along the bar, in the windows' coordinates: which way, and how far a
+        /// window travels that way to clear the screen.
+        let axis: CGVector
+        let extent: CGFloat
+        /// How far apart the window in front and the one coming in are kept: a
+        /// screen's length, and a little space between the two.
+        var spacing: CGFloat { extent + 20 }
+        /// The screen's corner radius, which the windows keep for the whole swipe.
+        let cornerRadius: CGFloat
+        let currentCorners: Corners
+        /// Which side the incoming app was brought out on: 1 for the app before,
+        /// coming in from the start of the bar, -1 for the one after.
+        var side: CGFloat = 0
+        var target: UIView?
+        var targetUUID: String?
+        /// How the incoming window was before it was brought out, to be put back
+        /// that way if the swipe is let go of short.
+        var targetWasHidden = false
+        var targetAlpha: CGFloat = 1
+        var targetIndex: Int?
+        var targetCorners: Corners?
+        /// How far along the bar the window in front already was when the swipe
+        /// took it: nothing from rest, more when it was caught still sliding. In
+        /// the finger's terms, so a window caught past the last app gives as it
+        /// was giving.
+        var origin: CGFloat = 0
+        /// Caught a swipe landing, or one that had: the window in front took the
+        /// stage while windows were still moving, and putting the other apps
+        /// away for it waits until they rest.
+        var caughtLanding = false
+
+        init(current: UIView, axis: CGVector, extent: CGFloat,
+             cornerRadius: CGFloat, currentCorners: Corners) {
+            self.current = current
+            self.axis = axis
+            self.extent = extent
+            self.cornerRadius = cornerRadius
+            self.currentCorners = currentCorners
+        }
+    }
+
+    /// A swipe let go of, its windows sliding the rest of the way: on to the app
+    /// it lands on, or back where they were. The next swipe takes them over from
+    /// wherever they have got to.
+    final class Settle {
+        let drag: Drag
+        /// The incoming window and its app, when the swipe lands on one.
+        let landing: (view: UIView, uuid: String)?
+
+        init(drag: Drag, landing: (view: UIView, uuid: String)?) {
+            self.drag = drag
+            self.landing = landing
+        }
+    }
+}
+
+@available(iOS 16.0, *)
+extension MultitaskDockManager {
+    /// Starts a swipe along the bar's app button, which moves between the running
+    /// apps the way a swipe along the Home indicator does in iOS. To the right,
+    /// the app used before the one in front comes in from the left, and swipes
+    /// that follow go on back through the ones before it; to the left, forward
+    /// again. Both windows follow the finger. One swipe can follow another
+    /// without waiting: windows still sliding from the last are taken over from
+    /// where they are.
+    ///
+    /// Returns false where there is nothing to move: no app in front, the
+    /// switcher open, a window flying into or out of its icon.
+    func quickSwitchBegan() -> Bool {
+        let run = quickSwitch
+        guard run.drag == nil, !isHomeState, !isAppSwitcherOpen,
+              !windowHostingView.backdropSuspended else { return false }
+        var caught: UIView?
+        var caughtLanding = false
+        if let settle = run.settling {
+            caughtLanding = settle.landing != nil || settle.drag.caughtLanding
+            caught = catchQuickSwitch(settle)
+        }
+        guard let uuid = frontmostAppUUID,
+              let current = apps.first(where: { $0.appUUID == uuid })?.view,
+              let host = current.superview,
+              !current.isHidden, current.alpha > 0.1 else {
+            // Nothing to take on after all: what was caught comes to rest.
+            if let caught {
+                caught.transform = .identity
+                hideBlurredSpringboard()
+            }
+            return false
+        }
+        if let caught, caught !== current { caught.transform = .identity }
+
+        // The run goes on while the app it last landed on is in front, not yet
+        // used, with the same apps running. Anything else starts a new run from
+        // the order as it now is.
+        let running = apps.map(\.appUUID)
+        let goingOn = run.isLive
+            && run.order.indices.contains(run.index) && run.order[run.index] == uuid
+            && Set(run.order) == Set(running)
+        if !goingOn {
+            run.order = running.reversed()
+            run.index = run.order.firstIndex(of: uuid) ?? 0
+        }
+
+        // The bar's long axis, carried into the windows' coordinates by the turn
+        // that lays the bar along its edge: along the bar is left and right to
+        // the user on every edge.
+        let along = CGPoint(x: 1, y: 0).applying(barBaseTransform)
+        let axis = CGVector(dx: along.x.rounded(), dy: along.y.rounded())
+        let extent = axis.dx != 0 ? host.bounds.width : host.bounds.height
+
+        // The switcher's card shows the app as it was left, taken while the
+        // window is still whole on screen.
+        captureSnapshot(for: uuid)
+        current.layer.removeAllAnimations()
+        // Caught still sliding, it is taken on from where it was; otherwise from rest.
+        let offset = caught === current
+            ? current.transform.tx * axis.dx + current.transform.ty * axis.dy : 0
+        if offset == 0 { current.transform = .identity }
+        // Shaped like the screen from the first moment of the swipe until the
+        // window is back at rest, as iOS shows an app being swiped.
+        let cornerRadius = deviceScreenCornerRadius
+        let drag = MultitaskQuickSwitch.Drag(current: current, axis: axis, extent: extent,
+                                             cornerRadius: cornerRadius,
+                                             currentCorners: .clip(current.layer, radius: cornerRadius))
+        drag.caughtLanding = caughtLanding && caught === current
+        run.drag = drag
+        showBlurredSpringboard(behind: current, in: host)
+        if offset != 0 {
+            // The app beside it, on the side it has uncovered, comes back out
+            // where it was, and the finger takes the two on from there.
+            bringOutQuickSwitchTarget(on: offset > 0 ? 1 : -1, for: drag)
+            drag.origin = drag.target != nil
+                ? offset : Self.quickSwitchRubberBandInverse(offset, extent: extent)
+            quickSwitchChanged(0)
+        }
+        return true
+    }
+
+    /// The swipe stopped without the finger lifting: the system's own gestures
+    /// took the touch, or the bar went from under it. What it moved goes back.
+    func quickSwitchCancelled() {
+        guard let drag = quickSwitch.drag else { return }
+        quickSwitch.drag = nil
+        settleQuickSwitchBack(drag)
+    }
+
+    /// `translation` is how far the finger has gone along the bar since the
+    /// swipe started, positive to the right.
+    func quickSwitchChanged(_ translation: CGFloat) {
+        guard let drag = quickSwitch.drag, drag.current.superview != nil else { return }
+        let position = drag.origin + translation
+        let side: CGFloat = position > 0 ? 1 : (position < 0 ? -1 : drag.side)
+        if side != drag.side { bringOutQuickSwitchTarget(on: side, for: drag) }
+        if let target = drag.target {
+            place(drag.current, at: position, along: drag)
+            place(target, at: position - side * drag.spacing, along: drag)
+        } else {
+            // No app that way: the window only gives a little, as a scroll view
+            // does pulled past its end.
+            place(drag.current, at: Self.quickSwitchRubberBand(position, extent: drag.extent),
+                  along: drag)
+        }
+    }
+
+    /// `velocity` is the finger's along the bar as it lifted, in points a second.
+    func quickSwitchEnded(_ translation: CGFloat, velocity: CGFloat) {
+        guard let drag = quickSwitch.drag else { return }
+        quickSwitch.drag = nil
+        let position = drag.origin + translation
+        // Flicked, or let go a third of the way across having moved that way:
+        // the switch is made. A window caught still sliding may start past that
+        // third, and is only switched away by moving it on. Flicking back the
+        // other way calls it off however far it went.
+        let flicking = abs(velocity) > 350
+        let flickedBack = flicking && (velocity > 0) != (drag.side > 0)
+        let pulledAcross = abs(position) > drag.extent * 0.3 && translation * drag.side > 0
+        guard let target = drag.target, let uuid = drag.targetUUID,
+              drag.current.superview != nil, !flickedBack,
+              flicking || pulledAcross else {
+            settleQuickSwitchBack(drag)
+            return
+        }
+        let settle = MultitaskQuickSwitch.Settle(drag: drag, landing: (target, uuid))
+        quickSwitch.settling = settle
+        // The bar's app button names the incoming app now, carried in after the
+        // windows. Which way first and the app a turn later: SwiftUI sends the
+        // outgoing name off with the transition it was last drawn with.
+        quickSwitchLandingSide = drag.side
+        DispatchQueue.main.async {
+            withAnimation(Self.quickSwitchLabelAnimation) { self.quickSwitchLanding = uuid }
+        }
+        // Carries on at the finger's speed and eases to a stop.
+        let remaining = max(drag.spacing - abs(position), 1)
+        UIView.animate(withDuration: 0.4, delay: 0, usingSpringWithDamping: 1,
+                       initialSpringVelocity: min(abs(velocity) / remaining, 30),
+                       options: [.beginFromCurrentState, .allowUserInteraction]) {
+            self.place(drag.current, at: drag.side * drag.spacing, along: drag)
+            target.transform = .identity
+        } completion: { _ in
+            // Unless the next swipe caught it on the way, which has seen to it.
+            guard self.quickSwitch.settling === settle else { return }
+            self.finishQuickSwitch(settle, caught: false)
+        }
+    }
+
+    private func place(_ view: UIView, at offset: CGFloat, along drag: MultitaskQuickSwitch.Drag) {
+        view.transform = CGAffineTransform(translationX: drag.axis.dx * offset,
+                                           y: drag.axis.dy * offset)
+    }
+
+    /// Brings out the app on `side` of the one in front, just off screen there,
+    /// putting back any brought out on the other side first.
+    private func bringOutQuickSwitchTarget(on side: CGFloat, for drag: MultitaskQuickSwitch.Drag) {
+        putBackQuickSwitchTarget(of: drag)
+        drag.side = side
+        let run = quickSwitch
+        guard let host = drag.current.superview else { return }
+        // To the right, further back in the run's order; to the left, forward.
+        // An app floating in Picture in Picture has no window here to bring in,
+        // so the swipe goes on past it to the next.
+        let step = side > 0 ? 1 : -1
+        var index = run.index + step
+        var found: (uuid: String, view: UIView)?
+        while found == nil, run.order.indices.contains(index) {
+            if let view = apps.first(where: { $0.appUUID == run.order[index] })?.view,
+               view.superview === host, !isInPiP(view) {
+                found = (run.order[index], view)
+            }
+            index += step
+        }
+        guard let (uuid, view) = found else { return }
+        drag.targetWasHidden = view.isHidden
+        drag.targetAlpha = view.alpha
+        drag.targetIndex = host.subviews.firstIndex(of: view)
+        view.layer.removeAllAnimations()
+        drag.targetCorners = .clip(view.layer, radius: drag.cornerRadius)
+        // Just under the window it comes in beside, so nothing else that was
+        // behind that one covers it on the way.
+        host.insertSubview(view, belowSubview: drag.current)
+        place(view, at: -side * drag.spacing, along: drag)
+        view.alpha = 1
+        view.isHidden = false
+        drag.target = view
+        drag.targetUUID = uuid
+    }
+
+    private func putBackQuickSwitchTarget(of drag: MultitaskQuickSwitch.Drag) {
+        guard let view = drag.target else { return }
+        view.transform = .identity
+        drag.targetCorners?.restore(view.layer)
+        view.alpha = drag.targetAlpha
+        view.isHidden = drag.targetWasHidden
+        if let index = drag.targetIndex, let host = view.superview {
+            host.insertSubview(view, at: min(index, host.subviews.count - 1))
+        }
+        drag.target = nil
+        drag.targetUUID = nil
+        drag.targetCorners = nil
+    }
+
+    private func settleQuickSwitchBack(_ drag: MultitaskQuickSwitch.Drag) {
+        let settle = MultitaskQuickSwitch.Settle(drag: drag, landing: nil)
+        quickSwitch.settling = settle
+        UIView.animate(withDuration: 0.35, delay: 0, usingSpringWithDamping: 0.9,
+                       initialSpringVelocity: 0,
+                       options: [.beginFromCurrentState, .allowUserInteraction]) {
+            drag.current.transform = .identity
+            if let target = drag.target {
+                self.place(target, at: -drag.side * drag.spacing, along: drag)
+            }
+        } completion: { _ in
+            guard self.quickSwitch.settling === settle else { return }
+            self.finishQuickSwitch(settle, caught: false)
+        }
+    }
+
+    /// Stops a settling swipe's windows where they have got to and does now what
+    /// its end would have done, but for the window left in front, which stays
+    /// where it was caught for the next swipe to take on. Returns that window.
+    private func catchQuickSwitch(_ settle: MultitaskQuickSwitch.Settle) -> UIView {
+        let drag = settle.drag
+        for view in [drag.current, drag.target].compactMap({ $0 }) {
+            if let sliding = view.layer.presentation()?.affineTransform() {
+                view.transform = sliding
+            }
+            view.layer.removeAllAnimations()
+        }
+        finishQuickSwitch(settle, caught: true)
+        return settle.landing?.view ?? drag.current
+    }
+
+    /// A swipe's windows have come to rest, or the next swipe has caught them on
+    /// the way, which leaves the window in front where it was caught and keeps
+    /// the blurred springboard up for itself.
+    ///
+    /// Landed, the incoming window has the screen: what a tap on its card in the
+    /// switcher does from here, minus the entrance, which the swipe was.
+    private func finishQuickSwitch(_ settle: MultitaskQuickSwitch.Settle, caught: Bool) {
+        quickSwitch.settling = nil
+        let drag = settle.drag
+        guard let (target, uuid) = settle.landing else {
+            // Back where it was, and the window brought out goes back to how it was.
+            drag.currentCorners.restore(drag.current.layer)
+            putBackQuickSwitchTarget(of: drag)
+            guard !caught else { return }
+            hideBlurredSpringboard()
+            if drag.caughtLanding { keepOneAppOnStage(drag.current) }
+            return
+        }
+        // In front of the window it replaced, which goes back to its place behind
+        // it, as a window brought forward leaves the rest.
+        target.superview?.bringSubviewToFront(target)
+        drag.current.transform = .identity
+        drag.currentCorners.restore(drag.current.layer)
+        drag.targetCorners?.restore(target.layer)
+        // The windows further back come back in, under the one now in front.
+        quickSwitch.springboard?.fadedWindows.removeAll { $0.view === target }
+        if !caught { hideBlurredSpringboard() }
+        // Closed while it was coming in: nothing to hand the stage to, and the
+        // button goes back to naming the app in front.
+        guard apps.contains(where: { $0.appUUID == uuid }) else {
+            withAnimation(Self.quickSwitchLabelAnimation) { quickSwitchLanding = nil }
+            quickSwitchLandingSide = nil
+            return
+        }
+
+        passURLSchemeToView(target)
+        for other in apps where other.appUUID != uuid {
+            dismissPresentation(forAppUUID: other.appUUID)
+        }
+        // Not while the next swipe has the windows: it is about to bring back out
+        // the one this would put away. That swipe does it as its windows rest.
+        if !caught { keepOneAppOnStage(target) }
+        if let window = keyWindow { bringViewToFront(target, in: window) }
+        windowTookStage(uuid: uuid)
+        // Named since the finger let go; from here as the app in front.
+        quickSwitchLanding = nil
+        quickSwitchLandingSide = nil
+
+        // The order iOS leaves after a run: the app landed on is the most recent,
+        // and the rest stay as the run found them, however many it passed.
+        let run = quickSwitch
+        var oldestFirst = Array(run.order.reversed())
+        oldestFirst.removeAll { $0 == uuid }
+        oldestFirst.append(uuid)
+        let byUUID = Dictionary(apps.map { ($0.appUUID, $0) }, uniquingKeysWith: { first, _ in first })
+        let reordered = oldestFirst.compactMap { byUUID[$0] }
+        if reordered.count == apps.count { apps = reordered }
+        run.index = run.order.firstIndex(of: uuid) ?? 0
+        // On until the app landed on is used; `windowTookStage` just ended it.
+        run.isLive = true
+    }
+
+    /// With only one app allowed on stage, the rest are put away once a swipe
+    /// has handed it to `view`.
+    private func keepOneAppOnStage(_ view: UIView) {
+        guard UserDefaults.lcShared().bool(forKey: "LCMaxOneAppOnStage"),
+              let decoratedVC = view._viewDelegate() as? DecoratedAppSceneViewController,
+              decoratedVC.isMaximized else { return }
+        minimizeAllWindows(except: decoratedVC, style: .fade)
+    }
+
+    /// A finger came down on an app window: whatever a run of swipes last landed
+    /// on is in use now, and the next swipe starts from the order as it is.
+    @objc func quickSwitchWindowTouched() {
+        quickSwitch.isLive = false
+    }
+
+    /// How the bar's app button changes apps. When a swipe lands, along the bar
+    /// after the windows: in from the side the incoming window came from, out
+    /// the side the outgoing one left by. Otherwise a cross-fade, where the
+    /// change is animated at all.
+    func barAppTransition(_ layoutDirection: LayoutDirection) -> AnyTransition {
+        guard let side = quickSwitchLandingSide else { return .opacity }
+        // To the right the windows went right, so the incoming app came from the left.
+        let fromLeft = side > 0
+        return .push(from: fromLeft == (layoutDirection == .leftToRight) ? .leading : .trailing)
+    }
+
+    /// Close to the window's own landing, so the name arrives with it.
+    private static let quickSwitchLabelAnimation = Animation.spring(response: 0.4, dampingFraction: 1)
+
+    /// Keeps the blurred springboard ready for the next swipe. The springboard
+    /// only changes while it is in view: covered, it is drawn once, a moment
+    /// after the opening is over; back in view, the picture is dropped.
+    func quickSwitchHomeStateChanged() {
+        let run = quickSwitch
+        run.springboardImageWork?.cancel()
+        run.springboardImageWork = nil
+        if isHomeState {
+            run.springboardImage = nil
+        } else if run.springboardImage == nil {
+            prepareQuickSwitchSpringboardImage(after: 1)
+        }
+    }
+
+    private func prepareQuickSwitchSpringboardImage(after delay: TimeInterval) {
+        let run = quickSwitch
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            run.springboardImageWork = nil
+            guard !self.isHomeState, run.springboardImage == nil else { return }
+            // Not while a window is still flying out of its icon, with the grid
+            // zoomed away behind it: a little later.
+            guard !self.windowHostingView.backdropSuspended else {
+                self.prepareQuickSwitchSpringboardImage(after: 0.5)
+                return
+            }
+            _ = self.quickSwitchSpringboardImage()
+        }
+        run.springboardImageWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
+    }
+
+    /// The springboard as a swipe shows it, drawn small and blurred, and kept
+    /// for the size of screen it was drawn for. Drawn here and now when there is
+    /// none ready.
+    private func quickSwitchSpringboardImage() -> UIImage? {
+        let run = quickSwitch
+        let size = windowHostingView.bounds.size
+        if let image = run.springboardImage, run.springboardImageSize == size { return image }
+        // A pixel to every four points: the blur keeps no detail a finer one would.
+        let scale: CGFloat = 0.25
+        guard let drawn = renderSpringboard(scale: scale)?.cgImage else { return nil }
+        let input = CIImage(cgImage: drawn)
+        // About the switcher's blur, with the lift in colour a material gives it.
+        let blurred = input.clampedToExtent()
+            .applyingGaussianBlur(sigma: 7)
+            .applyingFilter("CIColorControls", parameters: [kCIInputSaturationKey: 1.5])
+            .cropped(to: input.extent)
+        guard let output = Self.quickSwitchImageContext.createCGImage(blurred, from: input.extent) else {
+            return nil
+        }
+        let image = UIImage(cgImage: output, scale: scale, orientation: .up)
+        run.springboardImage = image
+        run.springboardImageSize = size
+        return image
+    }
+
+    private static let quickSwitchImageContext = CIContext()
+
+    /// Lays the blurred springboard under the windows as a swipe starts and hides
+    /// the ones behind `current`. One still fading away after the swipe before is
+    /// brought back instead.
+    private func showBlurredSpringboard(behind current: UIView, in host: UIView) {
+        let run = quickSwitch
+        // Before it is laid, so what is drawn is the springboard alone.
+        let image = quickSwitchSpringboardImage()
+        let springboard: MultitaskQuickSwitch.BlurredSpringboard
+        if let shown = run.springboard {
+            springboard = shown
+        } else {
+            guard let root = windowHostingView.superview else { return }
+            springboard = .init(frame: windowHostingView.frame)
+            // Under the window host, whose black would cover it, so that is held back.
+            root.insertSubview(springboard.view, belowSubview: windowHostingView)
+            windowHostingView.backdropHeldForQuickSwitch = true
+            run.springboard = springboard
+        }
+        springboard.generation += 1
+        springboard.imageView.image = image
+        springboard.fadedWindows.removeAll { $0.view === current }
+        let windows = Set(apps.compactMap(\.view).map(ObjectIdentifier.init))
+        for view in host.subviews where view !== current
+            && windows.contains(ObjectIdentifier(view)) && !view.isHidden && view.alpha > 0
+            && !isInPiP(view) && !springboard.fadedWindows.contains(where: { $0.view === view }) {
+            springboard.fadedWindows.append((view, view.alpha))
+        }
+        // All at once. The window in front covers the change, and whatever fades
+        // in is seen arriving late wherever the window has already moved aside.
+        springboard.scrim.layer.removeAllAnimations()
+        // Dimmed about as far as the switcher's material and scrim dim it; black
+        // when there is no picture.
+        springboard.scrim.alpha = image == nil ? 1 : 0.4
+        for (view, _) in springboard.fadedWindows {
+            view.layer.removeAllAnimations()
+            view.alpha = 0
+        }
+    }
+
+    /// Takes the blurred springboard away once the windows have settled. It goes
+    /// back to black for the backdrop to take over, and the windows behind fade
+    /// back in under the one in front.
+    private func hideBlurredSpringboard() {
+        let run = quickSwitch
+        guard let springboard = run.springboard else { return }
+        let generation = springboard.generation
+        UIView.animate(withDuration: 0.25, delay: 0,
+                       options: [.beginFromCurrentState, .allowUserInteraction, .curveEaseInOut]) {
+            springboard.scrim.alpha = 1
+            // Not one closed or minimized meanwhile, which stays the way that left it.
+            for (view, alpha) in springboard.fadedWindows where view.superview != nil && !view.isHidden {
+                view.alpha = alpha
+            }
+        } completion: { _ in
+            guard run.springboard === springboard, springboard.generation == generation else { return }
+            run.springboard = nil
+            springboard.view.removeFromSuperview()
+            self.windowHostingView.backdropHeldForQuickSwitch = false
+        }
+    }
+
+    private func isInPiP(_ view: UIView) -> Bool {
+        guard PiPManager.hasShared, let pipManager = PiPManager.shared,
+              let decoratedVC = view._viewDelegate() else { return false }
+        return pipManager.isPiP(withDecoratedVC: decoratedVC)
+    }
+
+    /// UIScrollView's resistance past its end: the further it is pulled, the less
+    /// it follows, never quite reaching the extent.
+    private static func quickSwitchRubberBand(_ offset: CGFloat, extent: CGFloat) -> CGFloat {
+        let extent = max(extent, 1)
+        let pulled = (1 - 1 / (abs(offset) * 0.55 / extent + 1)) * extent
+        return offset < 0 ? -pulled : pulled
+    }
+
+    /// How far the finger has to have pulled for the window to have given
+    /// `given`: the resistance above, undone.
+    private static func quickSwitchRubberBandInverse(_ given: CGFloat, extent: CGFloat) -> CGFloat {
+        let extent = max(extent, 1)
+        let pulled = min(abs(given), extent * 0.99)
+        let offset = pulled / (0.55 * (1 - pulled / extent))
+        return given < 0 ? -offset : offset
+    }
+}
+
+/// A swipe along the bar's app button, handed to the dock's quick switch.
+@available(iOS 16.0, *)
+private struct QuickSwitchSwipe: ViewModifier {
+    @EnvironmentObject var dockManager: MultitaskDockManager
+    @State private var reading = QuickSwitchSwipeReading()
+    /// True only while the drag is live. SwiftUI clears a `@GestureState` when the
+    /// gesture ends or is cancelled, but calls onEnded only when it ends — so a
+    /// swipe the system's own gestures took over would leave the windows where
+    /// the finger last had them, and the springboard blurred behind them.
+    @GestureState private var isDragging = false
+
+    func body(content: Content) -> some View {
+        content.simultaneousGesture(
+            // Measured in the bar's own space, where the strip lies horizontal
+            // whichever edge it is turned onto: along it is always left and right.
+            DragGesture(minimumDistance: 10, coordinateSpace: .global)
+                .updating($isDragging) { _, dragging, _ in dragging = true }
+                .onChanged { value in
+                    let dx = value.translation.width, dy = value.translation.height
+                    if reading.isSwitching == nil {
+                        // Along the bar only. The press under the finger gives up
+                        // at this distance, so a swipe never also opens the switcher.
+                        reading.isSwitching = abs(dx) > abs(dy) && dockManager.quickSwitchBegan()
+                        reading.origin = dx
+                    }
+                    guard reading.isSwitching == true else { return }
+                    dockManager.quickSwitchChanged(dx - reading.origin)
+                }
+                .onEnded { value in
+                    defer { reading.isSwitching = nil }
+                    guard reading.isSwitching == true else { return }
+                    let velocity: CGFloat
+                    if #available(iOS 17.0, *) {
+                        velocity = value.velocity.width
+                    } else {
+                        velocity = (value.predictedEndTranslation.width - value.translation.width) * 4
+                    }
+                    dockManager.quickSwitchEnded(value.translation.width - reading.origin,
+                                                 velocity: velocity)
+                }
+        )
+        .onChange(of: isDragging) { dragging in
+            if !dragging { cancelUnended() }
+        }
+        // Nor does a bar torn down mid-swipe tell its gesture anything.
+        .onDisappear { cancelUnended() }
+    }
+
+    /// Puts back what a cancelled swipe moved. A turn of the run loop later, so a
+    /// drag that ended has been through onEnded by then, whichever of the two
+    /// SwiftUI calls first: one still marked switching was cancelled. Either way
+    /// the next drag reads its direction afresh.
+    private func cancelUnended() {
+        let reading = reading, dockManager = dockManager
+        DispatchQueue.main.async {
+            defer { reading.isSwitching = nil }
+            if reading.isSwitching == true { dockManager.quickSwitchCancelled() }
+        }
+    }
+}
+
+/// The swipe's reading of the drag under way, kept in a reference so that
+/// updating it is not a change of view state.
+private final class QuickSwitchSwipeReading {
+    var isSwitching: Bool?
+    var origin: CGFloat = 0
 }
