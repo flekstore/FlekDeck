@@ -4,9 +4,10 @@
 //
 //  Source management popup for the Installer. Lets the user add a repository
 //  (validated by fetching its manifest), pick one (which opens its catalog),
-//  and — in edit mode — delete sources (the default FlekSt0re source is
-//  protected and requires a confirm before deletion). Persists to the same
-//  UserDefaults("savedRepositories") store used elsewhere.
+//  and — in edit mode — delete sources or drag them into a new order (the
+//  default FlekSt0re source is protected and stays on top). Persists to the
+//  same UserDefaults("savedRepositories") store used elsewhere, so the
+//  Installer's source pills follow the same order.
 //
 
 import SwiftUI
@@ -22,6 +23,16 @@ struct FlekSourcesPopup: View {
     @State private var errorMessage = ""
     @State private var showError = false
     @State private var pendingDelete: AppRepository?
+    /// The source being dragged by its handle, and how far it has been pulled
+    /// from the slot it now sits in.
+    @State private var draggedRepoID: UUID?
+    @State private var dragOffset: CGFloat = 0
+    /// Where the dragged source started, so the translation can be read
+    /// against it however many slots it has moved since.
+    @State private var dragStartIndex = 0
+    @State private var rowHeight: CGFloat = 60
+
+    private static let rowSpacing: CGFloat = 8
 
     private static let flekBlue = Color(red: 0/255, green: 117/255, blue: 255/255)
     private static let fieldFill = Color(red: 136/255, green: 136/255, blue: 136/255).opacity(0.15)
@@ -43,6 +54,7 @@ struct FlekSourcesPopup: View {
                     Button(editing ? "lc.common.done".loc : "lc.flek.edit".loc) {
                         withAnimation { editing.toggle() }
                     }
+                    .disabled(draggedRepoID != nil)
                 }
                 ToolbarItem(placement: .topBarTrailing) {
                     Button("lc.common.done".loc) { dismiss() }
@@ -105,11 +117,17 @@ struct FlekSourcesPopup: View {
     private var connectedSourcesSection: some View {
         VStack(alignment: .leading, spacing: 8) {
             Text("lc.flek.connectedSources".loc).font(.system(size: 15, weight: .semibold)).foregroundStyle(.secondary)
-            VStack(spacing: 8) {
+            VStack(spacing: Self.rowSpacing) {
                 ForEach(repos) { repo in
+                    let dragged = repo.id == draggedRepoID
                     sourceRow(repo)
+                        .scaleEffect(dragged ? 1.03 : 1)
+                        .shadow(color: .black.opacity(dragged ? 0.18 : 0), radius: 12, y: 4)
+                        .offset(y: dragged ? dragOffset : 0)
+                        .zIndex(dragged ? 1 : 0)
                 }
             }
+            .coordinateSpace(name: Self.listSpace)
         }
     }
 
@@ -132,17 +150,79 @@ struct FlekSourcesPopup: View {
                     .font(.system(size: 14)).foregroundStyle(.secondary).lineLimit(1)
             }
             Spacer(minLength: 8)
-            Image(systemName: "chevron.right").font(.system(size: 16, weight: .medium)).foregroundStyle(Color(.tertiaryLabel))
+            if editing && !isDefault {
+                reorderHandle(repo)
+            } else if !editing {
+                Image(systemName: "chevron.right").font(.system(size: 16, weight: .medium)).foregroundStyle(Color(.tertiaryLabel))
+            }
         }
         .padding(.leading, 8).padding(.trailing, 14).padding(.vertical, 8)
         .background(RoundedRectangle(cornerRadius: 24, style: .continuous).fill(Color(.secondarySystemGroupedBackground)))
         .overlay(RoundedRectangle(cornerRadius: 24, style: .continuous).strokeBorder(Color(.separator), lineWidth: 1))
+        .background(GeometryReader { geo in
+            Color.clear.onAppear { rowHeight = geo.size.height }
+        })
         .contentShape(Rectangle())
         .onTapGesture {
             if editing { return }
             select(repo)
             dismiss()
         }
+    }
+
+    // MARK: Reordering
+
+    private static let listSpace = "sourcesList"
+
+    /// Drag handle of a third-party source: pulling it moves the row, and the
+    /// rows it passes step aside, as in a system list.
+    private func reorderHandle(_ repo: AppRepository) -> some View {
+        Image(systemName: "line.3.horizontal")
+            .font(.system(size: 18, weight: .medium))
+            .foregroundStyle(.secondary)
+            .frame(width: 44, height: 44)
+            .contentShape(Rectangle())
+            // Ahead of the scroll view's own pan, so pulling the handle moves
+            // the row rather than the page.
+            .highPriorityGesture(
+                DragGesture(minimumDistance: 0, coordinateSpace: .named(Self.listSpace))
+                    .onChanged { value in dragChanged(repo, translation: value.translation.height) }
+                    .onEnded { _ in dragEnded() }
+            )
+    }
+
+    private func dragChanged(_ repo: AppRepository, translation: CGFloat) {
+        if draggedRepoID == nil {
+            guard let start = repos.firstIndex(where: { $0.id == repo.id }) else { return }
+            dragStartIndex = start
+            withAnimation(.easeOut(duration: 0.15)) { draggedRepoID = repo.id }
+            UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        }
+        guard draggedRepoID == repo.id,
+              let current = repos.firstIndex(where: { $0.id == repo.id }) else { return }
+
+        let pitch = rowHeight + Self.rowSpacing
+        // FlekSt0re stays on top: nothing is dropped above it.
+        let firstMovable = (repos.lastIndex(where: { FlekInstallerView.isFlekstore($0) }) ?? -1) + 1
+        let target = min(max(dragStartIndex + Int((translation / pitch).rounded()), firstMovable),
+                         repos.count - 1)
+        if target != current {
+            withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) {
+                let moved = repos.remove(at: current)
+                repos.insert(moved, at: target)
+            }
+            UISelectionFeedbackGenerator().selectionChanged()
+        }
+        dragOffset = translation - CGFloat(target - dragStartIndex) * pitch
+    }
+
+    private func dragEnded() {
+        guard draggedRepoID != nil else { return }
+        withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) {
+            draggedRepoID = nil
+            dragOffset = 0
+        }
+        save()
     }
 
     // MARK: Logic
