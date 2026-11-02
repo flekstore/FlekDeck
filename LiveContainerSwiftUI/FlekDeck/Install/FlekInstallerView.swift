@@ -434,7 +434,17 @@ struct FlekInstallerView: View {
 
     /// Height reserved at the top so the first list row starts just below the
     /// floating bars, which overlay the scrolling list instead of pushing it down.
-    private var barsTopInset: CGFloat { barsBottomInset + 10 }
+    private var barsTopInset: CGFloat {
+        barsBottomInset + (searchActive ? 10 : Self.listGap(isFlekstore: viewModel.repository == .flekstore))
+    }
+
+    /// The gap between the bars and the first row of a source's list. On the
+    /// iPhone Duo the top blur reaches a few points further into a list that
+    /// starts right under the source pills, so such a list starts that much
+    /// lower there. FlekSt0re's, under its category bar, is clear of it.
+    private static func listGap(isFlekstore: Bool) -> CGFloat {
+        10 + (FlekDeviceModel.isDuo && !isFlekstore ? 7 : 0)
+    }
 
     /// Room at the bottom of the list for the floating bottom bar, plus the
     /// install tray when it's up, so the last row can still be scrolled clear.
@@ -627,7 +637,8 @@ struct FlekInstallerView: View {
     private func sourcePreview(_ repo: AppRepository) -> some View {
         let apps = neighbourCatalogs[repo.sourceURL] ?? []
         // The category bar comes with FlekSt0re, so its list starts lower.
-        let topInset: CGFloat = 8 + 52 + (Self.isFlekstore(repo) ? 8 + 44 : 0) + 10
+        let isFlekstore = Self.isFlekstore(repo)
+        let topInset: CGFloat = 8 + 52 + (isFlekstore ? 8 + 44 : 0) + Self.listGap(isFlekstore: isFlekstore)
         return FlekSourcePreviewPage(apps: Array(apps.prefix(Self.previewRowCount)),
                                      topInset: topInset,
                                      accent: Self.flekBlue,
