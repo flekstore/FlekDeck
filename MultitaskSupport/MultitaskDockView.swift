@@ -7415,8 +7415,8 @@ extension MultitaskDockManager {
     }
 
     /// Takes the blurred springboard away once the windows have settled. It goes
-    /// back to black for the backdrop to take over, and the windows behind fade
-    /// back in under the one in front.
+    /// back to black for the backdrop to take over, and the windows behind come
+    /// back with the backdrop, under the one in front.
     private func hideBlurredSpringboard() {
         let run = quickSwitch
         guard let springboard = run.springboard else { return }
@@ -7424,14 +7424,18 @@ extension MultitaskDockManager {
         UIView.animate(withDuration: 0.25, delay: 0,
                        options: [.beginFromCurrentState, .allowUserInteraction, .curveEaseInOut]) {
             springboard.scrim.alpha = 1
-            // Not one closed or minimized meanwhile, which stays the way that left it.
-            for (view, alpha) in springboard.fadedWindows where view.superview != nil && !view.isHidden {
-                view.alpha = alpha
-            }
         } completion: { _ in
             guard run.springboard === springboard, springboard.generation == generation else { return }
             run.springboard = nil
             springboard.view.removeFromSuperview()
+            // In the same moment as the backdrop, which then lies over them. Faded
+            // back in while it was still held off, they showed in every gap the
+            // window in front leaves for the length of the fade: beside a turned
+            // app, a strip of the one swiped away from where the housing is. Not
+            // one closed or minimized meanwhile, which stays the way that left it.
+            for (view, alpha) in springboard.fadedWindows where view.superview != nil && !view.isHidden {
+                view.alpha = alpha
+            }
             self.windowHostingView.backdropHeldForQuickSwitch = false
         }
     }
