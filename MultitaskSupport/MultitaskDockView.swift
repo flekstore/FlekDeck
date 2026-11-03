@@ -239,6 +239,17 @@ class AppInfoProvider {
     @Published private(set) var quickSwitchLanding: String?
     @Published private(set) var quickSwitchLandingSide: CGFloat?
     @Published var isAppSwitcherOpen: Bool = false
+    /// Whether the bar's app button reads Close all, as the switcher's chin does in
+    /// its place: on as the switcher opens, off as it closes back to an app or the
+    /// next time the bar comes up. The bar and the chin both read it, so the one
+    /// change turns the two of them together.
+    @Published private(set) var barShowsCloseAll = false
+    /// How the app button turns between the app's name and Close all.
+    private static let barAppButtonSwap = Animation.spring(response: 0.35, dampingFraction: 1)
+    /// The switcher is fading back to an app. Its cards and the blur behind them
+    /// grow a little as they go; its chin stays as it is, over the bar it hands
+    /// back to, which is the same but for the label already turning.
+    @Published private(set) var isDismissingAppSwitcher = false
     /// The interface orientation the switcher overrode, restored when it closes.
     private var orientationBeforeSwitcher: UIInterfaceOrientation?
     @Published var isClosingAll: Bool = false
@@ -1752,6 +1763,14 @@ class AppInfoProvider {
         
         DispatchQueue.main.async {
             self.isVisible = true
+            // Up again after the switcher went home, which leaves Close all on. Put
+            // back as it is rather than turned, even with the app's name just
+            // changed: the bar is only now coming into view.
+            if !self.isAppSwitcherOpen, self.barShowsCloseAll {
+                var instantly = Transaction()
+                instantly.disablesAnimations = true
+                withTransaction(instantly) { self.barShowsCloseAll = false }
+            }
             // Capture the design (corner radius + rounded/flat) now, even in
             // floating-button mode where the bar isn't laid out. Otherwise
             // `captureBarDesign()` — which only runs inside `updateDockFrame` — never
@@ -3798,6 +3817,17 @@ class AppInfoProvider {
         // window to turn; this keeps the rest of the orientation state consistent.
         refreshOrientationLock()
 
+        // Opened over the bar, the switcher's chin starts out exactly as the bar is,
+        // its app button still naming the app, and turns that into Close all along
+        // with the bar under it: the one thing on the bar that changes. With no bar
+        // up along the bottom there is nothing to match, and the chin comes in with
+        // Close all already on, its controls arriving as they always have.
+        let opensOverBar = isVisible && isSwitcherBarVisible && lastPlacedBarEdge == .bottom
+            && hostingController.map { !$0.view.isHidden && $0.view.alpha > 0.01 } == true
+        if !opensOverBar { barShowsCloseAll = true }
+        // Opened again before the last one had faded: this one starts at rest.
+        isDismissingAppSwitcher = false
+
         // Always recreate the overlay so it picks up the latest apps & snapshots
         switcherOverlayController?.view.removeFromSuperview()
 
@@ -3810,7 +3840,7 @@ class AppInfoProvider {
         refreshSwitcherScreenSize(animated: false)
 
         let overlayView = AnyView(
-            AppSwitcherOverlay()
+            AppSwitcherOverlay(opensOverBar: opensOverBar)
                 .environmentObject(self)
                 .preferredColorScheme(.dark)
                 .environment(\.colorScheme, .dark)
@@ -3845,11 +3875,18 @@ class AppInfoProvider {
         // press that asked for it, and a second tap as the overlay lands reads as
         // the one control stuttering rather than as the screen answering.
 
+        // The chin has been laid out naming the app, as the bar does. From here
+        // both turn to Close all in the same frames, so the overlay dissolving in
+        // over the bar shows one label changing rather than two crossing.
+        if opensOverBar {
+            withAnimation(Self.barAppButtonSwap) { barShowsCloseAll = true }
+        }
+
         // Keep the existing bottom bar at full opacity underneath during the
         // entrance. Its black rounded region is identical to the overlay's own
-        // bottom bar, so leaving it solid means the bar never cross-fades — only
-        // the "buttons" on it appear to change, instead of the whole bar blinking
-        // as the overlay dissolves in over transparent content.
+        // bottom bar, and so are its buttons but for the middle one's label, so
+        // leaving it solid means the bar never cross-fades — instead of the whole
+        // bar blinking as the overlay dissolves in over transparent content.
         UIView.animate(
             withDuration: Constants.standardAnimationDuration,
             delay: 0,
@@ -3971,6 +4008,9 @@ class AppInfoProvider {
         // so it's already in place behind the overlay before it fades — the app
         // is revealed already showing the correct control, with no bar flash.
         applyPreferredControlInstant()
+        // And its app button turns back from Close all to the app, the bar's and
+        // the fading chin's together, as they turned on the way in.
+        withAnimation(Self.barAppButtonSwap) { barShowsCloseAll = false }
 
         // Restore normal rotation now that the portrait-only overlay is closing.
         refreshOrientationLock()
@@ -3980,16 +4020,21 @@ class AppInfoProvider {
         // swallowing touches on the way.
         overlay.view.isUserInteractionEnabled = false
 
+        // The grow is the overlay's own, not the window's: grown as a whole, the
+        // chin came apart from the bar under it, the two drawn over each other a
+        // few points out for as long as the fade lasted.
+        withAnimation(.easeIn(duration: Constants.shortAnimationDuration1)) {
+            isDismissingAppSwitcher = true
+        }
         UIView.animate(
             withDuration: Constants.shortAnimationDuration1,
             delay: 0,
             options: [.curveEaseIn, .allowUserInteraction]
         ) {
             overlay.view.alpha = 0
-            overlay.view.transform = CGAffineTransform(scaleX: 1.05, y: 1.05)
         } completion: { _ in
             overlay.view.removeFromSuperview()
-            overlay.view.transform = .identity
+            if self.switcherOverlayController === overlay { self.isDismissingAppSwitcher = false }
             self.springboardSnapshot = nil
             self.ensureControlAccessible()
         }
@@ -4555,8 +4600,7 @@ struct SwitcherBarContentView: View {
                     dockManager.showAppSwitcher()
                 }
             } label: {
-                FrontmostAppIconLabel()
-                    .stableBarGlass(capsule: true)
+                BarAppButtonLabel(showsCloseAll: dockManager.barShowsCloseAll)
             }
             .accessibilityLabel("App Switcher")
             .modifier(QuickSwitchSwipe())
@@ -4636,16 +4680,72 @@ struct FrontmostAppIconLabel: View {
                 .frame(width: MultitaskDockManager.Constants.barMenuChevronWidth)
         }
         .padding(.horizontal, MultitaskDockManager.Constants.barMenuHPadding)
-        // Sized by the manager, not by this layout: the switcher's Close all has
-        // to agree with it, and a capsule that sized itself to its contents would
-        // stretch to fill the row's slack instead of stopping at its cap.
-        .frame(width: dockManager.barMenuWidth,
+    }
+}
+
+// MARK: - Bar App Button Label
+/// The middle of the bar's row: the app in front on the bar, and Close all on the
+/// switcher's chin, which stands in the bar's place while the switcher is open.
+/// One view for both, so the switcher opening over the bar changes this label and
+/// nothing else: the capsule takes Close all's width, and the buttons either side
+/// follow it in.
+@available(iOS 16.0, *)
+private struct BarAppButtonLabel: View {
+    @EnvironmentObject var dockManager: MultitaskDockManager
+    let showsCloseAll: Bool
+    /// Bumped by the chin's Close all, to bounce its glyph.
+    var closeBounce = 0
+
+    var body: some View {
+        ZStack {
+            if showsCloseAll {
+                CloseAllLabel(bounce: closeBounce)
+                    .transition(Self.swap)
+            } else {
+                FrontmostAppIconLabel()
+                    .transition(Self.swap)
+            }
+        }
+        // Sized by the manager, not by this layout: the bar's and the chin's have
+        // to agree, and a capsule that sized itself to its contents would stretch
+        // to fill the row's slack instead of stopping at its cap.
+        .frame(width: showsCloseAll ? dockManager.barCloseAllWidth : dockManager.barMenuWidth,
                height: MultitaskDockManager.Constants.barButtonSize)
+        // The label going out is as often the wider one: cut to the capsule as it
+        // narrows.
+        .clipShape(Capsule())
+        .stableBarGlass(capsule: true)
         // The width belongs to whichever app is frontmost, so it changes on every
         // switch. Glide between the two rather than snapping, the way iOS resizes
         // its own pill controls.
         .animation(.spring(response: 0.3, dampingFraction: 0.9),
                    value: dockManager.barMenuWidth)
+    }
+
+    /// Blurred out and in, the way iOS changes a control's label in place.
+    private static var swap: AnyTransition {
+        if #available(iOS 17.0, *) {
+            return AnyTransition(BlurReplaceTransition(configuration: .downUp))
+        }
+        return .opacity
+    }
+}
+
+/// What the app button reads while the switcher is open.
+@available(iOS 16.0, *)
+private struct CloseAllLabel: View {
+    let bounce: Int
+
+    var body: some View {
+        HStack(spacing: 5) {
+            Image(systemName: "xmark")
+                .font(.system(size: 14, weight: .semibold))
+                .modifier(SymbolBounce(value: bounce))
+            Text("Close all")
+                .font(.system(size: 14, weight: .medium))
+                .lineLimit(1)
+        }
+        .foregroundColor(.white)
     }
 }
 
@@ -4923,7 +5023,14 @@ struct AppSwitcherOverlay: View {
     /// Bumped on press to bounce each glyph; see `SymbolBounce`.
     @State private var closeBounce = 0
     @State private var homeBounce = 0
-    
+    /// Opened over the bar: the chin starts out as the bar is, with nothing of it
+    /// to arrive, and only its app button changes. See `presentAppSwitcher`.
+    let opensOverBar: Bool
+
+    init(opensOverBar: Bool) {
+        self.opensOverBar = opensOverBar
+    }
+
     private let cardSpacing: CGFloat = 16
 
     // Fixed corner radius (matches the Figma design spec).
@@ -5018,6 +5125,8 @@ struct AppSwitcherOverlay: View {
             // prevent. Easing out spends the opacity early and lets the last of it go
             // gently, so the glass comes up rather than snapping in.
             .animation(.easeOut(duration: 0.3), value: exiting)
+            // Grows with the cards as the switcher fades back to an app.
+            .scaleEffect(dockManager.isDismissingAppSwitcher ? 1.05 : 1)
             // Returning to the springboard lives HERE, on the backdrop, not on the
             // ZStack as a whole. The backdrop is the bottom-most, full-bleed layer;
             // every card, button and control sits above it. So whether a tap
@@ -5109,6 +5218,9 @@ struct AppSwitcherOverlay: View {
             // and visible, bringing that app forward while we are already on the
             // way to the springboard.
             .allowsHitTesting(!exiting)
+            // Fading back to an app, the cards grow a little as they go. The chin
+            // below doesn't: it stands over the bar it is handing back to.
+            .scaleEffect(dockManager.isDismissingAppSwitcher ? 1.05 : 1)
 
             // The chin: the switcher bar itself, anchored flush to the very bottom
             // edge with exactly the real bar's thickness (bar height + bottom safe
@@ -5142,31 +5254,21 @@ struct AppSwitcherOverlay: View {
                 }
                 .buttonStyle(BarControlButtonStyle())
                 .accessibilityLabel(dockManager.prefersFloatingButton ? "Use Switcher Bar" : "Hide Switcher Bar")
-                .modifier(ChinControlEntrance(shown: isPresented, index: 0, from: -1))
+                .modifier(ChinControlEntrance(shown: isPresented || opensOverBar, index: 0, from: -1))
 
                 Button(action: {
                     MultitaskDockManager.buttonHaptic()
                     closeBounce += 1
                     showCloseAllConfirm = true
                 }) {
-                    HStack(spacing: 5) {
-                        Image(systemName: "xmark")
-                            .font(.system(size: 14, weight: .semibold))
-                            .modifier(SymbolBounce(value: closeBounce))
-                        Text("Close all")
-                            .font(.system(size: 14, weight: .medium))
-                            .lineLimit(1)
-                    }
-                    .foregroundColor(.white)
-                    // The same fixed width the bar's app menu uses, so the capsule
-                    // this one replaces is exactly the size it was.
-                    .frame(width: dockManager.barCloseAllWidth,
-                           height: MultitaskDockManager.Constants.barButtonSize)
-                    .stableBarGlass(capsule: true)
-                    .contentShape(Capsule())
+                    // The bar's app button, which turns into Close all as the switcher
+                    // opens over it; on the way home it stays Close all to the end.
+                    BarAppButtonLabel(showsCloseAll: dockManager.barShowsCloseAll || exiting,
+                                      closeBounce: closeBounce)
+                        .contentShape(Capsule())
                 }
                 .buttonStyle(BarControlButtonStyle())
-                .modifier(ChinControlEntrance(shown: isPresented, index: 1, from: 0))
+                .modifier(ChinControlEntrance(shown: isPresented || opensOverBar, index: 1, from: 0))
                 .alert("Close All Apps?", isPresented: $showCloseAllConfirm) {
                     Button("Cancel", role: .cancel) { }
                     Button("Close All", role: .destructive) {
@@ -5191,7 +5293,7 @@ struct AppSwitcherOverlay: View {
                 }
                 .buttonStyle(BarControlButtonStyle())
                 .accessibilityLabel("Home")
-                .modifier(ChinControlEntrance(shown: isPresented, index: 2, from: 1))
+                .modifier(ChinControlEntrance(shown: isPresented || opensOverBar, index: 2, from: 1))
             }
             // Sized and spaced exactly as the real bar sizes and spaces its own
             // row — same button metric, same 10pt gaps, same 1.1 scale-up, same
