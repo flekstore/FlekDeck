@@ -38,6 +38,7 @@
 		E1946AD83041BFF8005CBEDD /* IOKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = E1946AD63041BFDD005CBEDD /* IOKit.framework */; };
 		E1F04CE730527A2200EABBF1 /* StikJIT.framework in Embed Frameworks */ = {isa = PBXBuildFile; fileRef = E1F04CE630527A2200EABBF1 /* StikJIT.framework */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
 		F1EC0DE1305600000A00000D /* LoopbackVPN.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = F1EC0DE1305600000A000002 /* LoopbackVPN.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
+		F1EC0DE1305800000D00000D /* WidgetExtension.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = F1EC0DE1305800000D000002 /* WidgetExtension.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		F1EC0DE2305700000B000002 /* IdevicePairing.dylib in Embed Frameworks */ = {isa = PBXBuildFile; fileRef = F1EC0DE2305700000B000001 /* IdevicePairing.dylib */; settings = {ATTRIBUTES = (CodeSignOnCopy, ); }; };
 /* End PBXBuildFile section */
 
@@ -119,6 +120,13 @@
 			remoteGlobalIDString = F1EC0DE1305600000A000001;
 			remoteInfo = LoopbackVPN;
 		};
+		F1EC0DE1305800000D00000B /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 17DCE9952C7067EC00731D42 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = F1EC0DE1305800000D000001;
+			remoteInfo = WidgetExtension;
+		};
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXCopyFilesBuildPhase section */
@@ -172,6 +180,7 @@
 				F1EC0DE1305600000A00000D /* LoopbackVPN.appex in Embed Foundation Extensions */,
 				17CAED2C2F234814008B1977 /* LaunchAppExtension.appex in Embed Foundation Extensions */,
 				E1292AF32DCA3A660065E12D /* LiveProcess.appex in Embed Foundation Extensions */,
+				F1EC0DE1305800000D00000D /* WidgetExtension.appex in Embed Foundation Extensions */,
 			);
 			name = "Embed Foundation Extensions";
 			runOnlyForDeploymentPostprocessing = 1;
@@ -213,6 +222,7 @@
 		E1946AD63041BFDD005CBEDD /* IOKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = IOKit.framework; path = Platforms/MacOSX.platform/Developer/SDKs/MacOSX27.0.sdk/System/Library/Frameworks/IOKit.framework; sourceTree = DEVELOPER_DIR; };
 		E1F04CE630527A2200EABBF1 /* StikJIT.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = StikJIT.framework; path = "StikJITHeadless/StikJIT.xcframework/ios-arm64/StikJIT.framework"; sourceTree = "<group>"; };
 		F1EC0DE1305600000A000002 /* LoopbackVPN.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = LoopbackVPN.appex; sourceTree = BUILT_PRODUCTS_DIR; };
+		F1EC0DE1305800000D000002 /* WidgetExtension.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = WidgetExtension.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 		F1EC0DE2305700000B000001 /* IdevicePairing.dylib */ = {isa = PBXFileReference; lastKnownFileType = "compiled.mach-o.dylib"; name = IdevicePairing.dylib; path = IdevicePairing/IdevicePairing.dylib; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
@@ -345,6 +355,20 @@
 			);
 			target = F1EC0DE1305600000A000001 /* LoopbackVPN */;
 		};
+		F1EC0DE1305800000D000004 /* PBXFileSystemSynchronizedBuildFileExceptionSet */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				Info.plist,
+			);
+			target = F1EC0DE1305800000D000001 /* WidgetExtension */;
+		};
+		F1EC0DE1305800000D00000E /* PBXFileSystemSynchronizedBuildFileExceptionSet */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				WidgetAppList.swift,
+			);
+			target = 17413FB42D9C0BAE00F3F928 /* LiveContainerSwiftUI */;
+		};
 /* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
 
 /* Begin PBXFileSystemSynchronizedGroupBuildPhaseMembershipExceptionSet section */
@@ -399,6 +423,7 @@
 		E1292C242DCA4E6F0065E12D /* MultitaskSupport */ = {isa = PBXFileSystemSynchronizedRootGroup; exceptions = (E1292C2D2DCA4E800065E12D /* PBXFileSystemSynchronizedBuildFileExceptionSet */, E1D5EDC02F48AA25004AF1E9 /* PBXFileSystemSynchronizedGroupBuildPhaseMembershipExceptionSet */, ); explicitFileTypes = {}; explicitFolders = (); path = MultitaskSupport; sourceTree = "<group>"; };
 		E15C6F2930440EAD00FEC6BD /* StikJITHeadless */ = {isa = PBXFileSystemSynchronizedRootGroup; exceptions = (F1EC0DE030551A0000B17D01 /* PBXFileSystemSynchronizedBuildFileExceptionSet */, ); explicitFileTypes = {}; explicitFolders = (); path = StikJITHeadless; sourceTree = "<group>"; };
 		F1EC0DE1305600000A000003 /* LoopbackVPN */ = {isa = PBXFileSystemSynchronizedRootGroup; exceptions = (F1EC0DE1305600000A000004 /* PBXFileSystemSynchronizedBuildFileExceptionSet */, ); explicitFileTypes = {}; explicitFolders = (); path = LoopbackVPN; sourceTree = "<group>"; };
+		F1EC0DE1305800000D000003 /* WidgetExtension */ = {isa = PBXFileSystemSynchronizedRootGroup; exceptions = (F1EC0DE1305800000D00000E /* PBXFileSystemSynchronizedBuildFileExceptionSet */, F1EC0DE1305800000D000004 /* PBXFileSystemSynchronizedBuildFileExceptionSet */, ); explicitFileTypes = {}; explicitFolders = (); path = WidgetExtension; sourceTree = "<group>"; };
 /* End PBXFileSystemSynchronizedRootGroup section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -496,6 +521,13 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		F1EC0DE1305800000D000006 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
@@ -555,6 +587,7 @@
 				17E23DE02F443A9300C55733 /* ShareExtension */,
 				E15C6F2930440EAD00FEC6BD /* StikJITHeadless */,
 				F1EC0DE1305600000A000003 /* LoopbackVPN */,
+				F1EC0DE1305800000D000003 /* WidgetExtension */,
 				174140B82D9C0F9100F3F928 /* Frameworks */,
 				17DCE99E2C7067EC00731D42 /* Products */,
 				17780D3B2E1C02420077E636 /* litehook */,
@@ -576,6 +609,7 @@
 				17E23DDF2F443A9300C55733 /* ShareExtension.appex */,
 				E15C6F2830440EAD00FEC6BD /* StikJITHeadless.framework */,
 				F1EC0DE1305600000A000002 /* LoopbackVPN.appex */,
+				F1EC0DE1305800000D000002 /* WidgetExtension.appex */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -794,6 +828,7 @@
 				17E23DE82F443A9300C55733 /* PBXTargetDependency */,
 				E15C6F2D30440EAD00FEC6BD /* PBXTargetDependency */,
 				F1EC0DE1305600000A00000C /* PBXTargetDependency */,
+				F1EC0DE1305800000D00000C /* PBXTargetDependency */,
 			);
 			name = LiveContainer;
 			productName = jump;
@@ -913,6 +948,28 @@
 			productReference = F1EC0DE1305600000A000002 /* LoopbackVPN.appex */;
 			productType = "com.apple.product-type.app-extension";
 		};
+		F1EC0DE1305800000D000001 /* WidgetExtension */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = F1EC0DE1305800000D000008 /* Build configuration list for PBXNativeTarget "WidgetExtension" */;
+			buildPhases = (
+				F1EC0DE1305800000D000005 /* Sources */,
+				F1EC0DE1305800000D000006 /* Frameworks */,
+				F1EC0DE1305800000D000007 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			fileSystemSynchronizedGroups = (
+				F1EC0DE1305800000D000003 /* WidgetExtension */,
+			);
+			name = WidgetExtension;
+			packageProductDependencies = (
+			);
+			productName = WidgetExtension;
+			productReference = F1EC0DE1305800000D000002 /* WidgetExtension.appex */;
+			productType = "com.apple.product-type.app-extension";
+		};
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
@@ -962,6 +1019,9 @@
 					};
 					F1EC0DE1305600000A000001 = {
 						CreatedOnToolsVersion = 27.0;
+					};
+					F1EC0DE1305800000D000001 = {
+						CreatedOnToolsVersion = 27.2;
 					};
 				};
 			};
@@ -1034,6 +1094,7 @@
 				17E23DDE2F443A9300C55733 /* ShareExtension */,
 				E15C6F2730440EAD00FEC6BD /* StikJITHeadless */,
 				F1EC0DE1305600000A000001 /* LoopbackVPN */,
+				F1EC0DE1305800000D000001 /* WidgetExtension */,
 			);
 		};
 /* End PBXProject section */
@@ -1096,6 +1157,13 @@
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 		F1EC0DE1305600000A000007 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		F1EC0DE1305800000D000007 /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -1217,6 +1285,13 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		F1EC0DE1305800000D000005 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXSourcesBuildPhase section */
 
 /* Begin PBXTargetDependency section */
@@ -1274,6 +1349,11 @@
 			isa = PBXTargetDependency;
 			target = F1EC0DE1305600000A000001 /* LoopbackVPN */;
 			targetProxy = F1EC0DE1305600000A00000B /* PBXContainerItemProxy */;
+		};
+		F1EC0DE1305800000D00000C /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = F1EC0DE1305800000D000001 /* WidgetExtension */;
+			targetProxy = F1EC0DE1305800000D00000B /* PBXContainerItemProxy */;
 		};
 /* End PBXTargetDependency section */
 
@@ -2358,6 +2438,73 @@
 			};
 			name = Release;
 		};
+		F1EC0DE1305800000D000009 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			baseConfigurationReferenceAnchor = 17B0F8452DE16FE4008110EA /* xcconfigs */;
+			baseConfigurationReferenceRelativePath = WidgetExtension.xcconfig;
+			buildSettings = {
+				CLANG_ENABLE_MODULES = YES;
+				CODE_SIGN_ENTITLEMENTS = WidgetExtension/WidgetExtension.entitlements;
+				CODE_SIGN_IDENTITY = "Apple Development";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 3.8.7;
+				DEVELOPMENT_TEAM = 2V7F92VA47;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = WidgetExtension/Info.plist;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				MARKETING_VERSION = 3.8.7;
+				PRODUCT_BUNDLE_IDENTIFIER = com.fs.flekdeck.WidgetExtension;
+				"PRODUCT_BUNDLE_IDENTIFIER[sdk=iphoneos*]" = com.fs.flekdeck.WidgetExtension;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				PROVISIONING_PROFILE_SPECIFIER = "";
+				SKIP_INSTALL = YES;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_OBJC_BRIDGING_HEADER = "WidgetExtension/WidgetExtension-Bridging-Header.h";
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		F1EC0DE1305800000D00000A /* Release */ = {
+			isa = XCBuildConfiguration;
+			baseConfigurationReferenceAnchor = 17B0F8452DE16FE4008110EA /* xcconfigs */;
+			baseConfigurationReferenceRelativePath = WidgetExtension.xcconfig;
+			buildSettings = {
+				CLANG_ENABLE_MODULES = YES;
+				CODE_SIGN_ENTITLEMENTS = WidgetExtension/WidgetExtension.entitlements;
+				CODE_SIGN_IDENTITY = "Apple Development";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 3.8.7;
+				DEVELOPMENT_TEAM = 2V7F92VA47;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = WidgetExtension/Info.plist;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				MARKETING_VERSION = 3.8.7;
+				PRODUCT_BUNDLE_IDENTIFIER = com.fs.flekdeck.WidgetExtension;
+				"PRODUCT_BUNDLE_IDENTIFIER[sdk=iphoneos*]" = com.fs.flekdeck.WidgetExtension;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				PROVISIONING_PROFILE_SPECIFIER = "";
+				SKIP_INSTALL = YES;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_OBJC_BRIDGING_HEADER = "WidgetExtension/WidgetExtension-Bridging-Header.h";
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
@@ -2474,6 +2621,15 @@
 			buildConfigurations = (
 				F1EC0DE1305600000A000009 /* Debug */,
 				F1EC0DE1305600000A00000A /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		F1EC0DE1305800000D000008 /* Build configuration list for PBXNativeTarget "WidgetExtension" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				F1EC0DE1305800000D000009 /* Debug */,
+				F1EC0DE1305800000D00000A /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;

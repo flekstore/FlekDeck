@@ -332,6 +332,9 @@ class LCAppModel: ObservableObject, Hashable {
         if isAppRunning {
             return
         }
+        // Counted toward the Apps widget's Most Used order however the launch
+        // goes on: in a window, in single mode, or brought to the front.
+        FlekWidgetSync.shared.recordLaunch(of: self)
         
         if uiContainers.isEmpty {
             let newName = NSUUID().uuidString

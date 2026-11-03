@@ -500,6 +500,11 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         .onChange(of: sharedAppSortManager.sortedApps.count) { _ in
             rebuildOrderedHomeItems()
         }
+        // The Apps widget shows the start of the home screen, so it follows
+        // every change to what the home screen shows and in what order.
+        .onChange(of: orderedHomeItems.map(\.displaySignature)) { _ in
+            FlekWidgetSync.shared.update(homeItems: orderedHomeItems)
+        }
         .onChange(of: installQueue.items.count) { _ in
             rebuildOrderedHomeItems()
         }
