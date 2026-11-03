@@ -201,12 +201,20 @@ class AppInfoProvider {
             if isHomeState { floatWindowLeavingStage(frontmostAppUUID) }
             updatePiPArming()
             quickSwitchHomeStateChanged()
+            // The next home state's dock may hold other apps, in other places.
+            if !isHomeState {
+                homeDockIconFrames.removeAll()
+                homeDockPillFrame = .zero
+            }
         }
     }
     /// Where each running app's icon sits in the home dock, in window
     /// coordinates, keyed by its home-screen item id. Written by the icons
-    /// themselves as they lay out, and read by the minimize animation when a
-    /// window's own springboard icon is on a page the user is not looking at.
+    /// themselves as they lay out, and read by the minimize animation, which puts
+    /// a window away into its icon here, and by an icon's own tap, which opens
+    /// the window out of it. Only what this home state's dock has laid out: it is
+    /// emptied as the home state ends, so a window going home waits the frame or
+    /// two the dock takes to appear rather than aiming where an icon used to be.
     /// Deliberately not `@Published`: it is written from a layout pass, and
     /// publishing it would invalidate the view that just reported it.
     var homeDockIconFrames: [String: CGRect] = [:]
@@ -214,6 +222,12 @@ class AppInfoProvider {
     /// aims at when it belongs in the dock but has no icon of its own there, the
     /// dock showing only the four most recent apps.
     var homeDockPillFrame: CGRect = .zero
+    /// How many of the most recent apps the home dock shows an icon for.
+    static let homeDockIconCount = 4
+    /// The home dock's icons standing aside, by home-screen item id, while a window
+    /// flies into or out of them: the window is carrying the icon for the length of
+    /// the flight, as on iOS, and its own place stands empty until it lands.
+    @Published var homeDockIconsStandingAside: Set<String> = []
     /// Set while a minimizing window is on its way to the dock, which makes the
     /// dock appear in place rather than springing in. A target still travelling
     /// into position is one the window cannot land on cleanly.
@@ -753,10 +767,6 @@ class AppInfoProvider {
         
         static let initialScale: CGFloat = 0.8
         static let bringToFrontScale: CGFloat = 1.02
-        /// How far a home dock icon swells as it takes a minimizing window. Kept
-        /// equal to the springboard icon's own bounce, so a window lands the same
-        /// way wherever it ends up.
-        static let homeDockIconBounceScale: CGFloat = 1.16
     }
 
     /// The app's own window — the one the springboard, the guest windows and the
@@ -1930,13 +1940,16 @@ class AppInfoProvider {
                 // the window nowhere near the icon it was going to.
                 self.whenUpright { self.flyEverythingHome() }
             } else {
-                // All minimized — bring back last used app
+                // All minimized — bring back last used app, out of its icon in the
+                // dock, where it went. Looked up before the home state ends, which
+                // takes the dock and what it knows of its icons with it.
+                let uuid = self.frontmostAppUUID ?? self.apps.last?.appUUID
+                let icon = self.apps.first { $0.appUUID == uuid }?.springboardItemID
+                    .flatMap { self.homeDockIconFrames[$0] }
                 self.isHomeState = false
                 self.showDock()
-                if let uuid = self.frontmostAppUUID {
-                    let _ = self.bringMultitaskViewToFront(uuid: uuid)
-                } else if let lastApp = self.apps.last {
-                    let _ = self.bringMultitaskViewToFront(uuid: lastApp.appUUID)
+                if let uuid {
+                    let _ = self.bringMultitaskViewToFront(uuid: uuid, fromIcon: icon)
                 }
             }
         }
@@ -1976,12 +1989,11 @@ class AppInfoProvider {
     private func flyEverythingHome() {
         // Whether anything is headed for the dock has to be settled before
         // the home state flips, since that is what puts the dock on screen:
-        // decided any later and its entrance has already begun.
+        // decided any later and its entrance has already begun. A window that
+        // flies home always goes into its icon there.
         let flying = frontmostVisibleWindow()
         homeDockShouldSkipEntrance = apps.contains { app in
-            guard let view = app.view, view === flying,
-                  let itemID = app.springboardItemID else { return false }
-            return LCMinimizeToIconAnimator.willUseHomeDock(forItemID: itemID)
+            app.view != nil && app.view === flying && app.springboardItemID != nil
         }
 
         // Minimize ALL visible windows and hide the dock bar. This is the
@@ -2900,10 +2912,14 @@ class AppInfoProvider {
     // Find and bring corresponding multitask view to front
     /// `fromRect` is the thing on screen the window should come out of, in window
     /// coordinates — a switcher card, which is already showing the app at a known
-    /// size and place. `from` is the weaker form for a caller that knows only
-    /// where a finger landed.
+    /// size and place — and `fromRectRadius` its corner radius on screen, which the
+    /// window starts out with. `fromIcon` is an icon it grows out of instead,
+    /// fading in over it: the home dock's, when that is what was pressed, rather
+    /// than the app's springboard icon that would otherwise be looked up. `from` is
+    /// the weaker form for a caller that knows only where a finger landed.
     func bringMultitaskViewToFront(uuid: String, from center: CGPoint? = nil,
-                                   fromRect: CGRect? = nil) -> Bool {
+                                   fromRect: CGRect? = nil, fromRectRadius: CGFloat? = nil,
+                                   fromIcon: CGRect? = nil) -> Bool {
         // Use the same foreground-active resolution as `keyWindow` rather than the
         // unordered `connectedScenes.first`, so a restored/background scene from a
         // previous launch can't be searched instead of the live one.
@@ -2926,12 +2942,14 @@ class AppInfoProvider {
                 for other in self.apps where other.appUUID != uuid {
                     self.dismissPresentation(forAppUUID: other.appUUID)
                 }
-                let source = fromRect ?? center.map(LCMinimizeToIconAnimator.sourceRect(around:))
+                let source = fromRect ?? fromIcon
+                    ?? center.map(LCMinimizeToIconAnimator.sourceRect(around:))
                 // A card is already showing this app, so the window grows out of it
                 // opaque. Everywhere else it comes out of an icon, which it has to
                 // fade in over.
-                animateViewAppearance(targetView, from: source, fadesIn: fromRect == nil,
-                                      in: window)
+                animateViewAppearance(targetView, from: source,
+                                      sourceRadius: fromRect == nil ? nil : fromRectRadius,
+                                      fadesIn: fromRect == nil, in: window)
                 windowTookStage(uuid: uuid)
                 return true
             }
@@ -3033,6 +3051,7 @@ class AppInfoProvider {
     }
 
     private func animateViewAppearance(_ view: UIView, from source: CGRect?,
+                                       sourceRadius: CGFloat? = nil,
                                        fadesIn: Bool = true, in window: UIWindow) {
         let isHidden = view.isHidden || view.alpha < 0.1
         let decoratedVC = view._viewDelegate() as? DecoratedAppSceneViewController
@@ -3067,6 +3086,7 @@ class AppInfoProvider {
                     view,
                     fromItemID: self.apps.first { $0.view === view }?.springboardItemID,
                     sourceInWindow: source,
+                    sourceCornerRadius: sourceRadius,
                     fadesIn: fadesIn
                 )
             }
@@ -6212,7 +6232,8 @@ struct AppSwitcherCard: View {
                 // showing the app, at the size and place the user just pressed.
                 let _ = dockManager.bringMultitaskViewToFront(
                     uuid: app.appUUID,
-                    fromRect: cardFrame == .zero ? nil : cardFrame
+                    fromRect: cardFrame == .zero ? nil : cardFrame,
+                    fromRectRadius: cornerRadius
                 )
             }
         }
@@ -6353,16 +6374,16 @@ struct MultitaskHomeIcons: View {
     var iconSize: CGFloat = FlekTheme.bottomBarAppIconSize
 
     var body: some View {
-        ForEach(Array(dockManager.apps.suffix(4))) { app in
+        ForEach(Array(dockManager.apps.suffix(MultitaskDockManager.homeDockIconCount))) { app in
             MultitaskHomeIcon(app: app, iconSize: iconSize)
         }
     }
 }
 
 /// One running app in the home dock. Beyond drawing itself it does two things for
-/// the minimize animation: it publishes where it is, so a window whose own
-/// springboard icon is on a page the user is not looking at has somewhere real to
-/// go, and it takes the window when it arrives.
+/// the minimize animation: it publishes where it is, for the app's window to fly
+/// into when it is put away and to open out of when this is pressed, and it stands
+/// aside while the window is in the air, carrying it.
 @available(iOS 16.0, *)
 private struct MultitaskHomeIcon: View {
     let app: DockAppModel
@@ -6373,12 +6394,22 @@ private struct MultitaskHomeIcon: View {
     static let cornerRadius: CGFloat = 10
 
     @ObservedObject private var dockManager = MultitaskDockManager.shared
-    @State private var scale: CGFloat = 1
+
+    /// A window is flying into this icon or out of it, and is drawn as the icon
+    /// itself until it lands, so its place here stands empty.
+    private var isStandingAside: Bool {
+        app.springboardItemID.map { dockManager.homeDockIconsStandingAside.contains($0) } ?? false
+    }
 
     var body: some View {
         Button {
             MultitaskDockManager.buttonHaptic()
-            let _ = dockManager.bringMultitaskViewToFront(uuid: app.appUUID)
+            // Out of this icon, the one pressed, even with the app's own on the
+            // springboard page in view as well.
+            let _ = dockManager.bringMultitaskViewToFront(
+                uuid: app.appUUID,
+                fromIcon: app.springboardItemID.flatMap { dockManager.homeDockIconFrames[$0] }
+            )
         } label: {
             if let icon = SwitcherBarContentView.cachedIcon(for: app) {
                 Image(uiImage: icon)
@@ -6395,41 +6426,27 @@ private struct MultitaskHomeIcon: View {
             }
         }
         .buttonStyle(.plain)
-        .scaleEffect(scale)
+        // Gone and back in the same frame the flight hands over in, so neither
+        // the window nor the icon shows twice.
+        .opacity(isStandingAside ? 0 : 1)
+        .animation(nil, value: isStandingAside)
         .background(
             GeometryReader { geometry in
-                // Kept on disappear rather than withdrawn. The dock is only on
-                // screen in the home state, so it is absent at the very moment a
-                // window is leaving for it, and the last known position of a
-                // fixed bottom pill is a better answer than none. A stale entry
-                // is checked against the screen before it is used, and refreshed
-                // the moment the icon lays out again.
+                // Not withdrawn on disappear: the manager forgets the lot as the
+                // home state ends, and nothing is published outside one, so a
+                // dock on its way out cannot leave a position behind.
                 Color.clear
                     .onAppear { publishFrame(geometry.frame(in: .global)) }
                     .onChange(of: geometry.frame(in: .global)) { publishFrame($0) }
             }
         )
-        .onReceive(NotificationCenter.default.publisher(for: .lcHomeDockIconDidTakeWindow)) { note in
-            guard let itemID = note.object as? String, itemID == app.springboardItemID else { return }
-            // Set the peak outright and spring back from it. The two have to be
-            // separate updates or SwiftUI coalesces them and the pop never shows.
-            scale = MultitaskDockManager.Constants.homeDockIconBounceScale
-            DispatchQueue.main.async {
-                withAnimation(.spring(response: 0.3, dampingFraction: 0.56)) { scale = 1 }
-            }
-        }
     }
 
     private func publishFrame(_ frame: CGRect) {
-        guard let itemID = app.springboardItemID, frame.width > 1, frame.height > 1 else { return }
+        guard MultitaskDockManager.shared.isHomeState,
+              let itemID = app.springboardItemID, frame.width > 1, frame.height > 1 else { return }
         MultitaskDockManager.shared.homeDockIconFrames[itemID] = frame
     }
-}
-
-extension Notification.Name {
-    /// A minimizing window has landed on its icon in the home dock, which is that
-    /// icon's cue to answer it. Object is the home-screen item id.
-    static let lcHomeDockIconDidTakeWindow = Notification.Name("LCHomeDockIconDidTakeWindow")
 }
 
 // MARK: - Multitask Home Dock Pill
@@ -6507,7 +6524,7 @@ struct MultitaskHomeDockPill: View {
     /// in it — the dock holds only the four most recent apps, so a fifth still has
     /// somewhere to go.
     private func publishPillFrame(_ frame: CGRect) {
-        guard frame.width > 1, frame.height > 1 else { return }
+        guard MultitaskDockManager.shared.isHomeState, frame.width > 1, frame.height > 1 else { return }
         MultitaskDockManager.shared.homeDockPillFrame = frame
     }
 

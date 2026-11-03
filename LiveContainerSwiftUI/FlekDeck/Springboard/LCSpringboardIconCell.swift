@@ -509,6 +509,9 @@ final class LCSpringboardIconCell: UICollectionViewCell {
         // the next app to be handed that cell drew its name over no icon at all,
         // and kept doing so: nothing else ever put the transform back.
         iconImageView.transform = .identity
+        // And the icon a window was flying into or out of when the page was
+        // recycled, which stood aside for the flight and would otherwise stay gone.
+        iconImageView.alpha = 1
         nameLabel.alpha = 1
         setName(nil, shared: false)
         deleteButton.isHidden = true

@@ -179,8 +179,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
     /// How the dock arrives. Normally it springs in beside the search button, but
     /// not when a minimizing window is already on its way to it: something still
     /// travelling into position is not something a window can land on, and the
-    /// window's own arrival is the animation that matters at that moment. The
-    /// icon it lands on answers with its own bounce either way.
+    /// window's own arrival is the animation that matters at that moment.
     private var dockEntranceAnimation: Animation? {
         if #available(iOS 16.0, *), MultitaskDockManager.shared.homeDockShouldSkipEntrance {
             // A single frame rather than no animation at all. The dock is inserted
@@ -192,6 +191,19 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             return .linear(duration: 0.01)
         }
         return .spring(response: 0.42, dampingFraction: 0.82)
+    }
+
+    /// What the dock arrives with: grown out of the search button's side, or with a
+    /// window already on its way to one of its icons, only faded in where it
+    /// stands. Grown, its icons start out crowded toward the search button, and a
+    /// window that measures its icon on that first frame flies to where the dock
+    /// is only passing through: the rightmost app to the dock's own switcher
+    /// button, before its icon turns up further left.
+    private func dockTransition(anchor: UnitPoint) -> AnyTransition {
+        if #available(iOS 16.0, *), MultitaskDockManager.shared.homeDockShouldSkipEntrance {
+            return .opacity
+        }
+        return .scale(scale: 0.6, anchor: anchor).combined(with: .opacity)
     }
 
     /// The home bar: the multitask dock pill (only while apps are running) beside
@@ -214,7 +226,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                     FlekBarStack(axis: axis, spacing: 10) {
                         if showMultitaskDock {
                             MultitaskHomeDockPill(darkModeIcon: darkModeIcon, axis: axis)
-                                .transition(.scale(scale: 0.6, anchor: pillAnchor).combined(with: .opacity))
+                                .transition(dockTransition(anchor: pillAnchor))
                                 .installerBarShadow()
                         }
                         Button {
@@ -237,7 +249,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             FlekBarStack(axis: axis, spacing: 10) {
                 if #available(iOS 16.0, *), showMultitaskDock {
                     MultitaskHomeDockPill(darkModeIcon: darkModeIcon, axis: axis)
-                        .transition(.scale(scale: 0.6, anchor: pillAnchor).combined(with: .opacity))
+                        .transition(dockTransition(anchor: pillAnchor))
                         .installerBarShadow()
                 }
                 FlekGlassCircleButton(systemImage: "magnifyingglass", size: controlSize) {
