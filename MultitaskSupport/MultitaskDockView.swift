@@ -205,6 +205,8 @@ class AppInfoProvider {
             if !isHomeState {
                 homeDockIconFrames.removeAll()
                 homeDockPillFrame = .zero
+            } else if !oldValue {
+                homeStatesBegun &+= 1
             }
         }
     }
@@ -222,6 +224,16 @@ class AppInfoProvider {
     /// aims at when it belongs in the dock but has no icon of its own there, the
     /// dock showing only the four most recent apps.
     var homeDockPillFrame: CGRect = .zero
+    /// Counts the home states begun, so the home dock reports where it is for
+    /// each one: what it reported for the last was forgotten as that one ended.
+    /// A dock coming into view reports as it appears. One brought back before it
+    /// had finished leaving — home again inside the half second its exit takes,
+    /// an app opened and put straight away — is the same dock as before, with
+    /// nothing appearing, and whatever moved in it moved while the home state
+    /// was off, when nothing is taken. It reports on this instead, and without
+    /// it the window going home found no place in the dock and went into its
+    /// springboard icon.
+    @Published private(set) var homeStatesBegun = 0
     /// How many of the most recent apps the home dock shows an icon for.
     static let homeDockIconCount = 4
     /// The home dock's icons standing aside, by home-screen item id, while a window
@@ -6434,10 +6446,15 @@ private struct MultitaskHomeIcon: View {
             GeometryReader { geometry in
                 // Not withdrawn on disappear: the manager forgets the lot as the
                 // home state ends, and nothing is published outside one, so a
-                // dock on its way out cannot leave a position behind.
+                // dock on its way out cannot leave a position behind. Published
+                // again as each home state begins, for a dock called back on its
+                // way out, which has no appearance to publish on.
                 Color.clear
                     .onAppear { publishFrame(geometry.frame(in: .global)) }
                     .onChange(of: geometry.frame(in: .global)) { publishFrame($0) }
+                    .onChange(of: dockManager.homeStatesBegun) { _ in
+                        publishFrame(geometry.frame(in: .global))
+                    }
             }
         )
     }
@@ -6479,9 +6496,13 @@ struct MultitaskHomeDockPill: View {
                 .modifier(DockPillBackground(isCircle: false))
                 .background(
                     GeometryReader { geometry in
+                        // Again as each home state begins, as the icons do.
                         Color.clear
                             .onAppear { publishPillFrame(geometry.frame(in: .global)) }
                             .onChange(of: geometry.frame(in: .global)) { publishPillFrame($0) }
+                            .onChange(of: dockManager.homeStatesBegun) { _ in
+                                publishPillFrame(geometry.frame(in: .global))
+                            }
                     }
                 )
         } else {
