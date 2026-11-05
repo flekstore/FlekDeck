@@ -130,8 +130,11 @@ final class LCSpringboardIconCell: UICollectionViewCell {
     }()
 
     /// Hosted SwiftUI percentage view with `.contentTransition(.numericText())`.
+    /// Made the first time this cell shows a download: every icon on the home
+    /// screen is one of these cells, and only one being installed ever shows a
+    /// percentage. See `percentHost()`.
     private var percentHostingController: UIHostingController<PercentageText>?
-    private var percentHostView: UIView!
+    private var percentHostView: UIView? { percentHostingController?.view }
 
     /// Blue progress bar near bottom of icon (download phase).
     private let progressTrack: UIView = {
@@ -285,12 +288,6 @@ final class LCSpringboardIconCell: UICollectionViewCell {
         installOverlay.addSubview(spinnerRingView)
         installOverlay.addSubview(failedSymbol)
 
-        let hostingVC = UIHostingController(rootView: PercentageText(percent: 0))
-        hostingVC.view.backgroundColor = .clear
-        hostingVC.view.isHidden = true
-        percentHostingController = hostingVC
-        percentHostView = hostingVC.view
-        installOverlay.addSubview(percentHostView)
         progressTrack.addSubview(progressFill)
         installOverlay.addSubview(progressTrack)
         installOverlay.layer.addSublayer(ringTrackLayer)
@@ -370,7 +367,7 @@ final class LCSpringboardIconCell: UICollectionViewCell {
         spinnerFillLayer.path = spinnerPath.cgPath
         spinnerFillLayer.frame = spinnerBounds
 
-        percentHostView.frame = CGRect(x: 0, y: 0, width: iconS, height: iconS)
+        percentHostView?.frame = CGRect(x: 0, y: 0, width: iconS, height: iconS)
 
         // Progress bar near bottom of icon (download phase)
         let trackW = iconS * 0.78
@@ -523,7 +520,7 @@ final class LCSpringboardIconCell: UICollectionViewCell {
         installOverlay.isHidden = true
         spinnerRingView.isHidden = true
         stopSpinnerAnimation()
-        percentHostView.isHidden = true
+        percentHostView?.isHidden = true
         percentHostingController?.rootView = PercentageText(percent: 0)
         progressTrack.isHidden = true
         ringTrackLayer.isHidden = true
@@ -702,7 +699,7 @@ final class LCSpringboardIconCell: UICollectionViewCell {
             failedSymbol.isHidden = false
             spinnerRingView.isHidden = true
             stopSpinnerAnimation()
-            percentHostView.isHidden = true
+            percentHostView?.isHidden = true
             progressTrack.isHidden = true
             ringTrackLayer.isHidden = true
             ringFillLayer.isHidden = true
@@ -715,7 +712,7 @@ final class LCSpringboardIconCell: UICollectionViewCell {
             // Indeterminate: show spinning ring, hide everything else
             spinnerRingView.isHidden = false
             startSpinnerAnimation()
-            percentHostView.isHidden = true
+            percentHostView?.isHidden = true
             progressTrack.isHidden = true
             ringTrackLayer.isHidden = true
             ringFillLayer.isHidden = true
@@ -724,7 +721,7 @@ final class LCSpringboardIconCell: UICollectionViewCell {
             // Install phase: show circular ring
             spinnerRingView.isHidden = true
             stopSpinnerAnimation()
-            percentHostView.isHidden = true
+            percentHostView?.isHidden = true
             progressTrack.isHidden = true
             ringTrackLayer.isHidden = false
             ringFillLayer.isHidden = false
@@ -737,14 +734,27 @@ final class LCSpringboardIconCell: UICollectionViewCell {
             // Download phase: show percentage + progress bar
             spinnerRingView.isHidden = true
             stopSpinnerAnimation()
-            percentHostView.isHidden = false
-            percentHostingController?.rootView = PercentageText(percent: Int((state.fraction * 100).rounded()))
+            let percent = percentHost()
+            percent.view.isHidden = false
+            percent.rootView = PercentageText(percent: Int((state.fraction * 100).rounded()))
             progressTrack.isHidden = false
             ringTrackLayer.isHidden = true
             ringFillLayer.isHidden = true
             currentFraction = state.fraction
             updateProgressFillWidth()
         }
+    }
+
+    /// The percentage view, made on first use, below the progress bar where it
+    /// has always stood.
+    private func percentHost() -> UIHostingController<PercentageText> {
+        if let percentHostingController { return percentHostingController }
+        let hostingVC = UIHostingController(rootView: PercentageText(percent: 0))
+        hostingVC.view.backgroundColor = .clear
+        installOverlay.insertSubview(hostingVC.view, belowSubview: progressTrack)
+        percentHostingController = hostingVC
+        setNeedsLayout()
+        return hostingVC
     }
 
     private func updateProgressFillWidth() {
