@@ -154,9 +154,18 @@ enum FlekTheme {
     static let sideBarWidth: CGFloat = 56
     /// A running app's icon in the column, the size of the status bar's Wi-Fi glyph.
     static let sideBarAppIconSize: CGFloat = 41
+    /// A button in the column over an app, and in the switcher's: the size of iOS's
+    /// own buttons in that column, the back button above them among them.
+    static let sideBarButtonSize: CGFloat = 48
     /// The glyph in the column's buttons: the same share of them as the bottom
     /// bar's glyph is of its controls.
     static var sideBarGlyphSize: CGFloat { sideBarWidth * 0.42 }
+    /// The glyph on a button in the column over an app: the share of it the
+    /// search button's glyph is of the search button.
+    static var sideBarButtonGlyphSize: CGFloat { sideBarButtonSize * 0.42 }
+    /// The app's icon on the app button in that column: the share of the button
+    /// the running apps' icon is of the pill's width.
+    static var sideBarButtonIconSize: CGFloat { sideBarButtonSize * sideBarAppIconSize / sideBarWidth }
 
     /// A navigation control: the circle a back or close button occupies, at the
     /// size the system gives the same buttons in a navigation bar. Fixed rather

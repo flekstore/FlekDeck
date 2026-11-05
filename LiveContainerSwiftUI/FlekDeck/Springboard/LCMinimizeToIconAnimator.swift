@@ -468,8 +468,8 @@ enum LCMinimizeToIconAnimator {
             sourceRadius = min(source.frame.width * iconCornerRadiusRatio, halfSide)
         }
         let shape = FlightShape(on: view,
-                                from: collapsed, radius: sourceRadius / scale,
-                                to: size, radius: fullSizeRadius(of: view, in: container),
+                                from: collapsed, radii: .uniform(sourceRadius / scale),
+                                to: size, radii: fullSizeRadii(of: view, in: container),
                                 spring: spring, settling: settling)
         // The icon's picture, which the app comes up through. With no picture to
         // be had, the window fades in over the icon as it used to.
@@ -610,8 +610,8 @@ enum LCMinimizeToIconAnimator {
         let landedRadius = min(target.width * iconCornerRadiusRatio,
                                min(target.width, target.height) / 2)
         let shape = FlightShape(on: view,
-                                from: size, radius: fullSizeRadius(of: view, in: container),
-                                to: landed, radius: landedRadius / scale,
+                                from: size, radii: fullSizeRadii(of: view, in: container),
+                                to: landed, radii: .uniform(landedRadius / scale),
                                 spring: spring, settling: settling)
         // The icon's picture, brought up over the last part of the way so that it is
         // the icon that lands rather than a window shrunk to its size. A flight with
@@ -693,48 +693,63 @@ enum LCMinimizeToIconAnimator {
         max(0.01, max(target.width / max(size.width, 1), target.height / max(size.height, 1)))
     }
 
-    /// The radius a window has in flight at its own full size: the screen's for
-    /// one that spans the screen, as iOS shows an app on the move, and its own for
-    /// a smaller one. Back to its own as it comes to rest, when the shape is taken
-    /// off.
-    private static func fullSizeRadius(of view: UIView, in container: UIView) -> CGFloat {
+    /// The corners a window has in flight at its own full size: the screen's for
+    /// one that spans the screen, as iOS shows an app on the move — corner by
+    /// corner where the display's differ, as the iPhone Duo's cover display's do —
+    /// and its own for a smaller one. Back to its own as it comes to rest, when the
+    /// shape is taken off.
+    private static func fullSizeRadii(of view: UIView, in container: UIView) -> FlekCornerRadii {
         let resting = view.layer.cornerRadius
-        guard #available(iOS 16.0, *), view.bounds.width >= container.bounds.width - 1 else { return resting }
-        let screen = MultitaskDockManager.shared.deviceScreenCornerRadius
-        return min(max(resting, screen), min(view.bounds.width, view.bounds.height) / 2)
+        guard #available(iOS 16.0, *), view.bounds.width >= container.bounds.width - 1 else { return .uniform(resting) }
+        let limit = min(view.bounds.width, view.bounds.height) / 2
+        return MultitaskDockManager.shared.deviceScreenCornerRadii.map { min(max(resting, $0), limit) }
     }
 
     /// The shape a window is cut to in flight: a mask over the whole of it, a
     /// rounded rectangle kept centred that changes size and radius on the flight's
     /// spring. The window changes shape without being squeezed, and without its
     /// own bounds — a guest's, which it would lay out again for — being touched.
+    ///
+    /// One layer where the corners go from and to the same radius all round, as
+    /// most screens' do; where they don't, a layer for each group of corners
+    /// rounded alike, each the mask of the one before (see `FlekCornerRadii.cut`),
+    /// all changing together on the same spring.
     private final class FlightShape {
-        private let mask = CALayer()
+        private let mask: CALayer
         private weak var view: UIView?
 
-        init(on view: UIView, from: CGSize, radius fromRadius: CGFloat,
-             to: CGSize, radius toRadius: CGFloat, spring: Spring, settling: TimeInterval) {
+        init(on view: UIView, from: CGSize, radii fromRadii: FlekCornerRadii,
+             to: CGSize, radii toRadii: FlekCornerRadii, spring: Spring, settling: TimeInterval) {
             self.view = view
-            mask.name = LCMinimizeToIconAnimator.flightMaskName
-            mask.backgroundColor = UIColor.black.cgColor
-            mask.cornerCurve = .continuous
             CATransaction.begin()
             CATransaction.setDisableActions(true)
+            let parts = FlekCornerRadii.cut(size: to, from: fromRadii, to: toRadii)
+            mask = parts[0].layer
+            mask.name = LCMinimizeToIconAnimator.flightMaskName
             mask.position = CGPoint(x: view.layer.bounds.midX, y: view.layer.bounds.midY)
-            mask.bounds = CGRect(origin: .zero, size: to)
-            mask.cornerRadius = toRadius
             CATransaction.commit()
 
-            let resize = spring.animation(keyPath: "bounds.size")
-            resize.fromValue = NSValue(cgSize: from)
-            resize.toValue = NSValue(cgSize: to)
-            resize.duration = settling
-            mask.add(resize, forKey: "resize")
-            let round = spring.animation(keyPath: "cornerRadius")
-            round.fromValue = fromRadius
-            round.toValue = toRadius
-            round.duration = settling
-            mask.add(round, forKey: "round")
+            for (index, part) in parts.enumerated() {
+                let resize = spring.animation(keyPath: "bounds.size")
+                resize.fromValue = NSValue(cgSize: from)
+                resize.toValue = NSValue(cgSize: to)
+                resize.duration = settling
+                part.layer.add(resize, forKey: "resize")
+                let round = spring.animation(keyPath: "cornerRadius")
+                round.fromValue = part.from
+                round.toValue = part.to
+                round.duration = settling
+                part.layer.add(round, forKey: "round")
+                // Each after the first fills the one before, whose middle moves
+                // as it changes size.
+                if index > 0 {
+                    let centre = spring.animation(keyPath: "position")
+                    centre.fromValue = NSValue(cgPoint: CGPoint(x: from.width / 2, y: from.height / 2))
+                    centre.toValue = NSValue(cgPoint: CGPoint(x: to.width / 2, y: to.height / 2))
+                    centre.duration = settling
+                    part.layer.add(centre, forKey: "centre")
+                }
+            }
             view.layer.mask = mask
         }
 

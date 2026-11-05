@@ -19,6 +19,9 @@ extension NSNotification.Name {
     /// Posted when the home bar is switched on or off in Settings, so it can appear
     /// or go away without waiting for the app window to be reopened.
     static let multitaskHomeBarSettingChanged = NSNotification.Name("MultitaskHomeBarSettingChanged")
+    /// Posted when Personalization's Bar Position changes, so a bar up over an app
+    /// moves into or out of the side column at once.
+    static let multitaskBarPositionChanged = NSNotification.Name("MultitaskBarPositionChanged")
     /// Posted by a guest window once its app is drawing its own content, which is
     /// the cue to drop the launch screen the window opened with. Object is the
     /// window's view. Name is duplicated as a literal in
@@ -197,13 +200,20 @@ class AppInfoProvider {
     /// that forgot to tell the PiP manager would leave it armed on a window that
     /// is no longer there.
     @Published var frontmostAppUUID: String? {
-        didSet { floatWindowLeavingStage(oldValue); updatePiPArming() }
+        didSet {
+            floatWindowLeavingStage(oldValue)
+            updatePiPArming()
+            // Another app in front may have more of its own side bar, or less.
+            if frontmostAppUUID != oldValue { refreshSideColumnRoom() }
+        }
     }
     @Published var isHomeState: Bool = false {
         didSet {
             if isHomeState { floatWindowLeavingStage(frontmostAppUUID) }
             updatePiPArming()
             quickSwitchHomeStateChanged()
+            // Back on stage: what was decided while home is decided again.
+            if !isHomeState, oldValue { refreshSideColumnRoom() }
             // The next home state's dock may hold other apps, in other places.
             if !isHomeState {
                 homeDockIconFrames.removeAll()
@@ -290,6 +300,28 @@ class AppInfoProvider {
     /// to rotation (its own local geometry is always a horizontal strip and
     /// can't reveal orientation).
     @Published var isLandscapeBar: Bool = false
+    /// Whether the bar was last laid out standing upright in the side column an
+    /// iPhone Duo's status bar runs down, and on which side — for the bar's content
+    /// to draw itself as that column. See `sideColumnEdge(for:)`.
+    @Published private(set) var isSideColumnBar = false
+    @Published private(set) var isSideColumnOnLeft = false
+    /// The same for the switcher's controls, which take the bar's place while it is
+    /// open. Read for themselves when it opens: the bar may be down by then, and its
+    /// own placement only as recent as the last time it was up.
+    @Published private(set) var isSwitcherSideColumn = false
+    @Published private(set) var isSwitcherSideColumnOnLeft = false
+    /// Where each guest's own side bar sits, by its window's data UUID: its tab
+    /// bar and its other items, which an iPhone Duo stands in the column the side
+    /// column stands in. Told by the guest itself — see LCGuestSideBar.m.
+    private var guestSideBars: [String: GuestSideBar] = [:]
+    /// Whether the side column has stepped aside for the app in front, whose own
+    /// side bar leaves it no room. The floating button stands in for it meanwhile,
+    /// as for a bar put away by hand, but nothing has been chosen: the column comes
+    /// back by itself once there is room for it again.
+    private(set) var sideColumnStepsAside = false
+    /// Whether the floating button stands in for the bar: because it was chosen,
+    /// or because the side column has no room over the app in front.
+    private var usesFloatingButton: Bool { prefersFloatingButton || sideColumnStepsAside }
 
     /// The screen the switcher overlay sizes its cards against.
     ///
@@ -334,6 +366,9 @@ class AppInfoProvider {
             guard bounds.width > 0, bounds.height > 0 else { return }
 
             if let overlay, overlay.frame != bounds { overlay.frame = bounds }
+            // An iPhone Duo folding or unfolding under the switcher changes its
+            // window too, and the status bar's column goes with the display.
+            self.refreshSwitcherSideColumn()
             guard self.switcherScreenSize != bounds.size else { return }
 
             // Roughly the system's own rotation, so the cards resize and re-centre
@@ -504,6 +539,17 @@ class AppInfoProvider {
     /// converts a drag's layout-space landing spot back.
     private var navAssistViewEdge: ScreenEdge = .right
     private var navAssistAlongFraction: CGFloat = 0.5
+    /// The floating button's diameter: on an iPhone Duo the size of the side
+    /// column's own buttons, which are iOS's in that column, and elsewhere the
+    /// larger size it has always had.
+    private var navAssistSize: CGFloat {
+        FlekDeviceModel.isDuo ? FlekTheme.sideBarButtonSize : Constants.navAssistSize
+    }
+
+    /// Whether the floating button is where it was put rather than where it was
+    /// moved: a fresh one goes with the app's side bar as that changes, until it is
+    /// dragged or tucked away, or unless it came out tucked away.
+    private var navAssistFollowsSideBar = false
 
     /// Last device orientation worth acting on, as quarter-turns. `UIDevice` reports
     /// face-up and face-down as orientations of their own; a phone laid flat on a
@@ -619,6 +665,16 @@ class AppInfoProvider {
         return r > 0 ? r : 39
     }
 
+    /// The display's radius at each of its corners, as the interface is turned: the
+    /// shape an app's window is cut to while it moves — out of its dock icon, back
+    /// into it, along the bar in a swipe — as iOS shows an app on the move. The one
+    /// radius all round, except where the display's corners differ, as the iPhone
+    /// Duo's cover display's do from side to side.
+    var deviceScreenCornerRadii: FlekCornerRadii {
+        let screen = keyWindow?.windowScene?.screen ?? FlekTheme.screen
+        return FlekDeviceModel.displayCornerRadii(of: screen) ?? .uniform(deviceScreenCornerRadius)
+    }
+
     /// Resolved concave corner radius from the user setting: the stored slider
     /// value when set, otherwise the device screen radius (the default "match the
     /// phone's corners"). Read via `captureBarDesign()` into `barCornerRadiusActive`.
@@ -646,8 +702,12 @@ class AppInfoProvider {
         // window opening before the first bar of the session was placed would trim
         // itself against that. Nothing is reserved for a bar that has yet to take
         // its place; `showDock` tells the windows once it has.
+        // Nor for a bar standing in the side column: it is in the strip an iPhone
+        // Duo's status bar keeps for itself, which the guest's safe area already
+        // keeps its content out of.
         guard isSwitcherBarVisible,
               lastPlacedBarEdge != nil,
+              placedSideColumnEdge == nil,
               let barView = hostingController?.view,
               let window = keyWindow else { return .zero }
 
@@ -718,7 +778,9 @@ class AppInfoProvider {
         // Cleared on every edge first: the bar moves between them, and a reservation
         // left behind on the edge it came from would push content off the other side.
         var reserve = UIEdgeInsets.zero
-        if reserved {
+        // Nothing for the side column, which stands in the status bar's own strip —
+        // already inside the page's safe area.
+        if reserved, Self.sideColumnEdge(for: keyWindow?.traitCollection) == nil {
             switch barLayoutEdge {
             case .bottom: reserve.bottom = max(barFlatRegion - insets.bottom, 0)
             case .top:    reserve.top    = max(barFlatRegion - insets.top, 0)
@@ -1136,6 +1198,217 @@ class AppInfoProvider {
         return edge == .left || edge == .right
     }
 
+    /// The side of the window the bar stands upright in, beside an iPhone Duo's
+    /// status bar, or nil when it lies along an edge as it always has.
+    ///
+    /// The in-app half of Personalization's Side bar position: where the home screen
+    /// stands its search button and running apps in the column that status bar runs
+    /// down, the bar over an app stands in the same column, in the same place and at
+    /// the same width, with its buttons upright and nothing turned. Folded and
+    /// unfolded alike, but only while the system is showing a vertical bar at all.
+    private static func sideColumnEdge(for traits: UITraitCollection?) -> ScreenEdge? {
+        guard FlekDeviceModel.isDuo,
+              LCUtils.appGroupUserDefault.string(forKey: FlekDeckKeys.homeBarPosition)
+                == FlekHomeBarPosition.side.rawValue,
+              let traits else { return nil }
+        guard #available(iOS 27.1, *) else { return nil }
+        // The bar's edge follows the layout direction; the window's sides do not.
+        let rightToLeft = traits.layoutDirection == .rightToLeft
+        switch traits.verticalBarEdge {
+        case .leading:  return rightToLeft ? .right : .left
+        case .trailing: return rightToLeft ? .left : .right
+        default:        return nil
+        }
+    }
+
+    /// Whether the bar stands in the side column rather than along an edge, for the
+    /// pages that leave room for it at the bottom: in the column it takes none.
+    static func barStandsInSideColumn(for traits: UITraitCollection?) -> Bool {
+        sideColumnEdge(for: traits) != nil
+    }
+
+    /// Re-reads the side column for the switcher's controls.
+    private func refreshSwitcherSideColumn() {
+        let column = Self.sideColumnEdge(for: keyWindow?.traitCollection)
+        let inColumn = column != nil
+        let onLeft = column == .left
+        if isSwitcherSideColumn != inColumn { isSwitcherSideColumn = inColumn }
+        if isSwitcherSideColumnOnLeft != onLeft { isSwitcherSideColumnOnLeft = onLeft }
+    }
+
+    /// The side column the bar was last laid out in, if any. What the bar's
+    /// transforms, the room it reserves and its published state all follow.
+    private var placedSideColumnEdge: ScreenEdge? {
+        didSet {
+            let inColumn = placedSideColumnEdge != nil
+            let onLeft = placedSideColumnEdge == .left
+            if isSideColumnBar != inColumn { isSideColumnBar = inColumn }
+            if isSideColumnOnLeft != onLeft { isSideColumnOnLeft = onLeft }
+            // The column stands in the status bar's strip, which is all safe-area
+            // inset. Left to it, the hosting view lays the buttons out in what the
+            // inset leaves of its width — none — and they land off the strip's
+            // centre; `ignoresSafeArea()` in the content doesn't win that back.
+            if #available(iOS 16.4, *), let host = hostingController {
+                let regions: SafeAreaRegions = inColumn ? [] : .all
+                if host.safeAreaRegions != regions { host.safeAreaRegions = regions }
+            }
+        }
+    }
+
+    /// The side column's length: its three buttons stacked.
+    private var sideColumnLength: CGFloat {
+        FlekTheme.sideBarButtonSize * 3 + Constants.barSpacing * 2
+    }
+
+    /// A guest's report of its own side bar, in its window's points.
+    private struct GuestSideBar {
+        /// The lowest group of the app's items: its tab bar, where it has one.
+        var lowerTop: CGFloat
+        var lowerBottom: CGFloat
+        /// The bottom of the app's items above that group, if it has any there.
+        var upperBottom: CGFloat?
+        /// The height of the window those are measured in, and the side of it the
+        /// bar runs down.
+        var windowHeight: CGFloat
+        var onRight: Bool
+    }
+
+    /// How far the side column keeps from the app's own items: the gap iOS leaves
+    /// between its own in that column.
+    private static let sideColumnClearance: CGFloat = 12
+    /// The highest the side column climbs over an app with nothing above its tab
+    /// bar: where iOS starts an app's items, under the time and Wi-Fi, on the
+    /// cover display. On the inner display they start at 124pt, so there the column
+    /// stops 50pt short of where it could go.
+    private static let sideColumnHighestTop: CGFloat = 174
+
+    /// Told by a guest's window whenever the app's own side bar changes, packed as
+    /// LCGuestSideBar packs it; 0 for an app with none, or none any more.
+    @objc public func setGuestSideBar(_ state: UInt64, forAppUUID appUUID: String) {
+        if state == 0 {
+            guestSideBars[appUUID] = nil
+        } else {
+            let above = CGFloat((state >> 32) & 0xFFFF)
+            guestSideBars[appUUID] = GuestSideBar(
+                lowerTop: CGFloat(state & 0xFFFF),
+                lowerBottom: CGFloat((state >> 16) & 0xFFFF),
+                upperBottom: above > 0 ? above : nil,
+                windowHeight: CGFloat((state >> 48) & 0x7FFF),
+                onRight: (state >> 63) & 1 == 1)
+        }
+        if appUUID == frontmostAppUUID { refreshSideColumnRoom() }
+    }
+
+    /// Where the side column's foot goes over the app in front, in `bounds`: its
+    /// usual place, or above the app's tab bar where that would be under it. Nil
+    /// when the app's own side bar leaves no room for it anywhere.
+    ///
+    /// Only for an app that fills the screen: a smaller window's side bar runs
+    /// down its own edge, nowhere near the column.
+    private func sideColumnFoot(column: ScreenEdge, in bounds: CGRect) -> CGFloat? {
+        let standardFoot = bounds.maxY - FlekTheme.bottomBarScreenMargin
+        guard let bar = frontmostSideBar(column: column, in: bounds) else { return standardFoot }
+        let gap = Self.sideColumnClearance
+        let length = sideColumnLength
+        // Clear of the app's lowest group where it always stands: an app whose
+        // items are all at the top.
+        if bar.lowerBottom + gap + length <= standardFoot { return standardFoot }
+        // Otherwise above it, as close as iOS stacks its own items, and below
+        // whatever the app has higher up, or where iOS would start it.
+        let foot = min(standardFoot, bar.lowerTop - gap)
+        return foot - length >= bar.highestTop ? foot : nil
+    }
+
+    /// The app in front's own side bar, in `bounds`, where it runs down `column`'s
+    /// side of a window that fills the screen: its lowest group, and the highest
+    /// anything of FlekDeck's may go above it — clear of what the app has higher
+    /// up, or where iOS would start the app's items. Nil for any other app.
+    private func frontmostSideBar(column: ScreenEdge, in bounds: CGRect)
+        -> (lowerTop: CGFloat, lowerBottom: CGFloat, highestTop: CGFloat)? {
+        guard let uuid = frontmostAppUUID,
+              let bar = guestSideBars[uuid],
+              bar.onRight == (column == .right),
+              bar.windowHeight > 0,
+              let decorated = apps.first(where: { $0.appUUID == uuid })?.view?._viewDelegate()
+                as? DecoratedAppSceneViewController,
+              decorated.isMaximized else { return nil }
+        // From the window's own size rather than where it is drawn, which a window
+        // flying in or out of its icon is not yet, or no longer.
+        let scale = bounds.height / bar.windowHeight
+        return (bounds.minY + bar.lowerTop * scale,
+                bounds.minY + bar.lowerBottom * scale,
+                bar.upperBottom.map { bounds.minY + $0 * scale + Self.sideColumnClearance }
+                    ?? bounds.minY + Self.sideColumnHighestTop)
+    }
+
+    /// Where a fresh floating button's middle goes on the right of `host`, when an
+    /// iPhone Duo stands the app's own side bar down that side too: halfway down if
+    /// that is clear of the app's items, or else just above its tabs, as the side
+    /// column goes. Nil for halfway down regardless — no side bar on that side, or
+    /// no room above its tabs either.
+    private func navAssistSpotClearOfSideBar(in host: UIView) -> CGFloat? {
+        guard Self.sideColumnEdge(for: keyWindow?.traitCollection) == .right,
+              let bar = frontmostSideBar(column: .right, in: host.bounds) else { return nil }
+        let half = navAssistSize / 2
+        let gap = Self.sideColumnClearance
+        let range = navAssistAlongRange(for: .right, in: host.bounds, insets: host.safeAreaInsets)
+        let middle = (range.lowerBound + range.upperBound) / 2
+        let clearOfLowest = middle + half + gap <= bar.lowerTop || middle - half - gap >= bar.lowerBottom
+        if clearOfLowest, middle - half >= bar.highestTop { return nil }
+        let aboveTabs = bar.lowerTop - gap - half
+        return aboveTabs - half >= bar.highestTop ? aboveTabs : nil
+    }
+
+    /// Settles a fresh floating button on the right: above the app's tabs where
+    /// halfway down would be over them (`navAssistSpotClearOfSideBar`), halfway
+    /// down otherwise.
+    private func placeNavAssistClearOfSideBar(in host: UIView) {
+        if let spot = navAssistSpotClearOfSideBar(in: host) {
+            let range = navAssistAlongRange(for: .right, in: host.bounds, insets: host.safeAreaInsets)
+            rememberScreenPlacement(edge: .right, fraction: navAssistFraction(of: spot, in: range))
+        } else {
+            navAssistViewEdge = .right
+            navAssistAlongFraction = 0.5
+        }
+    }
+
+    /// Moves a floating button nobody has moved by hand to wherever a fresh one
+    /// would go now, as the app's side bar changes under it: from halfway down to
+    /// above the tabs, and back.
+    private func refreshNavAssistSpot() {
+        guard navAssistFollowsSideBar, !isNavAssistStashed,
+              let button = navAssistButton, let host = button.superview else { return }
+        placeNavAssistClearOfSideBar(in: host)
+        placeNavAssist(button, stashed: false, animated: true)
+    }
+
+    /// Decides again whether the side column has room over the app in front:
+    /// moves it there if so, and hands over to the floating button if not — and
+    /// back, once there is room again, unless the floating button was chosen.
+    private func refreshSideColumnRoom() {
+        // Left as it is while home: the app in front is the one that comes back,
+        // and its window, put away, is no measure of anything.
+        guard !isHomeState else { return }
+        let column = Self.sideColumnEdge(for: keyWindow?.traitCollection)
+        let noRoom = column.map { sideColumnFoot(column: $0, in: barLayoutBounds) == nil } ?? false
+        // The floating button, where it is up and nobody has moved it, goes with the
+        // app's side bar too.
+        defer { refreshNavAssistSpot() }
+        guard noRoom != sideColumnStepsAside else {
+            // The same answer, but perhaps another place for the column.
+            if isVisible, isSwitcherBarVisible, column != nil { updateDockFrame() }
+            return
+        }
+        sideColumnStepsAside = noRoom
+        // The switcher puts up whichever control is due as it closes.
+        guard isVisible, !isAppSwitcherOpen else { return }
+        if noRoom {
+            if isSwitcherBarVisible { hideSwitcherBar(choosingFloatingButton: false) }
+        } else if !prefersFloatingButton, !isSwitcherBarVisible, hasForegroundAppWindow() {
+            showSwitcherBar(choosingBar: false)
+        }
+    }
+
     /// The resting transform of the bar's hosting view: the turn that lays the
     /// strip along its layout edge with its concave top facing into the screen.
     ///
@@ -1144,7 +1417,10 @@ class AppInfoProvider {
     /// walks it round to the next one. Facing the interior is what makes the bar
     /// read the same to the user on every edge: the content leans into the screen,
     /// exactly as the landscape bar has always done.
+    ///
+    /// In the side column there is no turn: the column stands upright as it is.
     private var barBaseTransform: CGAffineTransform {
+        if placedSideColumnEdge != nil { return .identity }
         switch barLayoutEdge {
         case .bottom: return .identity
         case .right:  return CGAffineTransform(rotationAngle: -.pi / 2)
@@ -1158,7 +1434,13 @@ class AppInfoProvider {
     /// downward slide becomes an off-bottom slide in portrait and an off-right
     /// slide in landscape — the bar always exits through its own short edge.
     private func barHiddenTransform(offset: CGFloat = 50) -> CGAffineTransform {
-        CGAffineTransform(translationX: 0, y: offset).concatenating(barBaseTransform)
+        // The side column leaves through the edge it stands beside, and goes the
+        // whole way: it sits that far in from the edge and has its width to clear.
+        if let column = placedSideColumnEdge {
+            let travel = max(offset, FlekTheme.sideBarCentreInset + FlekTheme.sideBarWidth)
+            return CGAffineTransform(translationX: column == .left ? -travel : travel, y: 0)
+        }
+        return CGAffineTransform(translationX: 0, y: offset).concatenating(barBaseTransform)
     }
 
     // MARK: - Bar Width Calculation
@@ -1260,6 +1542,14 @@ class AppInfoProvider {
             name: .multitaskHomeBarSettingChanged,
             object: nil
         )
+        // Move the bar into or out of the side column the moment Bar Position
+        // changes — the page that changes it is itself up over the bar.
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(barPositionSettingChanged),
+            name: .multitaskBarPositionChanged,
+            object: nil
+        )
         // The bar and the bottom swipe share the bottom edge, and only one of them
         // may own it. Every path that raises or lowers the bar announces itself
         // here, so this is the one place able to reconcile the two whichever path
@@ -1312,6 +1602,16 @@ class AppInfoProvider {
             // needed to re-render the bar live — no re-layout. `captureBarDesign`
             // only publishes when a value actually changed.
             self.captureBarDesign()
+        }
+    }
+
+    @objc private func barPositionSettingChanged() {
+        DispatchQueue.main.async {
+            // In the side column or out of it, the app's side bar matters or not.
+            self.refreshSideColumnRoom()
+            if self.isVisible && self.isSwitcherBarVisible {
+                self.updateDockFrame()
+            }
         }
     }
 
@@ -1595,6 +1895,8 @@ class AppInfoProvider {
                 // converted into the bar's un-rotated local space below, so the same
                 // local shape works in landscape after the -90° transform.
                 guard let self = self else { return nil }
+                // The side column is its buttons and nothing else: all of it is bar.
+                guard !self.isSideColumnBar else { return nil }
                 let r = self.barCornerRadiusActive
                 let cg = self.barLedgeActive
                     ? BarTopBar(radius: r, curve: r * self.barLedgeAmountActive)
@@ -1658,21 +1960,45 @@ class AppInfoProvider {
         // told when it moves, below.
         let edgeChanged = lastPlacedBarEdge != edge
         lastPlacedBarEdge = edge
+        // Or upright in the side column beside an iPhone Duo's status bar, where the
+        // home screen's own bar stands: centred on the status bar's column, its foot
+        // as far from the bottom of the display as the home screen's. Placed before
+        // `apply` runs, since the transforms it sets follow it.
+        let column = Self.sideColumnEdge(for: keyWindow?.traitCollection)
+        let columnChanged = placedSideColumnEdge != column
+        placedSideColumnEdge = column
         let boundsSize: CGSize
         let center: CGPoint
-        switch edge {
-        case .bottom:
-            boundsSize = CGSize(width: screenBounds.width, height: thickness)
-            center = CGPoint(x: screenBounds.midX, y: screenBounds.height - thickness / 2)
-        case .top:
-            boundsSize = CGSize(width: screenBounds.width, height: thickness)
-            center = CGPoint(x: screenBounds.midX, y: thickness / 2)
-        case .right:
-            boundsSize = CGSize(width: screenBounds.height, height: thickness)
-            center = CGPoint(x: screenBounds.width - thickness / 2, y: screenBounds.midY)
-        case .left:
-            boundsSize = CGSize(width: screenBounds.height, height: thickness)
-            center = CGPoint(x: thickness / 2, y: screenBounds.midY)
+        if let column {
+            // Lifted above the app's own tab bar where it would be under it. With
+            // no room at all it has stepped aside, and this is only where it would
+            // stand; if that is out of step with what was decided, decide again.
+            let foot = sideColumnFoot(column: column, in: screenBounds)
+            if (foot == nil) != sideColumnStepsAside {
+                DispatchQueue.main.async { self.refreshSideColumnRoom() }
+            }
+            boundsSize = CGSize(width: FlekTheme.sideBarWidth, height: sideColumnLength)
+            center = CGPoint(
+                x: column == .left
+                    ? screenBounds.minX + FlekTheme.sideBarCentreInset
+                    : screenBounds.maxX - FlekTheme.sideBarCentreInset,
+                y: (foot ?? screenBounds.maxY - FlekTheme.bottomBarScreenMargin) - sideColumnLength / 2
+            )
+        } else {
+            switch edge {
+            case .bottom:
+                boundsSize = CGSize(width: screenBounds.width, height: thickness)
+                center = CGPoint(x: screenBounds.midX, y: screenBounds.height - thickness / 2)
+            case .top:
+                boundsSize = CGSize(width: screenBounds.width, height: thickness)
+                center = CGPoint(x: screenBounds.midX, y: thickness / 2)
+            case .right:
+                boundsSize = CGSize(width: screenBounds.height, height: thickness)
+                center = CGPoint(x: screenBounds.width - thickness / 2, y: screenBounds.midY)
+            case .left:
+                boundsSize = CGSize(width: screenBounds.height, height: thickness)
+                center = CGPoint(x: thickness / 2, y: screenBounds.midY)
+            }
         }
 
         let apply = {
@@ -1690,8 +2016,17 @@ class AppInfoProvider {
         // bar that moves to another edge leaves every open guest trimmed against
         // the old one. This is the same notification the show/hide path posts, and
         // it re-frames each maximized window and resizes its drawable.
-        if edgeChanged {
+        //
+        // Moving into or out of the side column is the same: in the column the bar
+        // takes no room from a window, and along an edge it does. Built-in pages keep
+        // their own reservation, so they are told directly.
+        if edgeChanged || columnChanged {
             NotificationCenter.default.post(name: .multitaskBarVisibilityChanged, object: nil)
+        }
+        if columnChanged {
+            for (_, controller) in internalPageControllers {
+                applyBarInset(to: controller, reserved: true)
+            }
         }
 
         if animated {
@@ -1804,8 +2139,9 @@ class AppInfoProvider {
             self.captureBarDesign()
 
             // Honor the saved control preference: show the floating button
-            // instead of the bar when the user has chosen it.
-            if self.prefersFloatingButton {
+            // instead of the bar when the user has chosen it, or while the side
+            // column has no room over the app.
+            if self.usesFloatingButton {
                 self.isSwitcherBarVisible = false
                 // No bar on screen → don't reserve its strip on internal pages.
                 for (_, controller) in self.internalPageControllers {
@@ -2232,8 +2568,9 @@ class AppInfoProvider {
 
             guard !barShown && !navShown else { return }
 
-            // Neither control is reachable — show the one the user prefers.
-            if self.prefersFloatingButton {
+            // Neither control is reachable — show the one the user prefers, or
+            // the floating button while the side column has no room.
+            if self.usesFloatingButton {
                 guard let keyWindow = self.keyWindow else { return }
                 self.isVisible = true
                 self.isSwitcherBarVisible = false
@@ -2241,7 +2578,7 @@ class AppInfoProvider {
                 self.hostingController?.view.alpha = 0
                 self.showNavAssist(in: keyWindow)
             } else if self.isVisible, barInWindow {
-                self.showSwitcherBar()
+                self.showSwitcherBar(choosingBar: false)
             } else {
                 // Off screen for want of a host, not merely slid away — and
                 // `showSwitcherBar` animates the bar where it stands. Only the way
@@ -2254,6 +2591,13 @@ class AppInfoProvider {
     
     /// Hide the switcher bar with slide-down animation and show navigation assist
     @objc public func hideSwitcherBar() {
+        hideSwitcherBar(choosingFloatingButton: true)
+    }
+
+    /// - Parameter choosingFloatingButton: whether this is the floating button
+    ///   being chosen, as the bar's own button chooses it, rather than the side
+    ///   column stepping aside for an app's side bar, which chooses nothing.
+    private func hideSwitcherBar(choosingFloatingButton: Bool) {
         guard let hostingController = hostingController, let keyWindow = self.keyWindow else { return }
         
         DispatchQueue.main.async {
@@ -2262,15 +2606,23 @@ class AppInfoProvider {
             // Taking the bar down is choosing the floating button, and the choice has
             // to outlive the controls: anything that puts them away — going home, an
             // app closing — brings back whichever one this names.
-            self.setPrefersFloatingButton(true)
+            if choosingFloatingButton { self.setPrefersFloatingButton(true) }
             NotificationCenter.default.post(name: .multitaskBarVisibilityChanged, object: nil)
             
             // Bring the floating button in immediately, concurrent with the bar
             // sliding out, instead of waiting for the slide to finish. The button
             // sits mid-right and the bar at the bottom, so they never overlap.
+            // Put away from the side column by hand, it starts tucked into that
+            // side instead, where the hide button just pressed was. Read before
+            // the column starts to leave.
+            var stashPoint: CGPoint?
+            if choosingFloatingButton, self.placedSideColumnEdge != nil, let column = hostingController.view {
+                stashPoint = column.convert(CGPoint(x: column.bounds.midX, y: FlekTheme.sideBarButtonSize / 2),
+                                            to: keyWindow)
+            }
             let showsFloatingButton = !self.isHomeState && self.hasForegroundAppWindow()
             if showsFloatingButton {
-                self.showNavAssist(in: keyWindow)
+                self.showNavAssist(in: keyWindow, stashedAt: stashPoint)
             }
 
             // Remove the bar reservation from internal pages so they stretch full
@@ -2310,6 +2662,12 @@ class AppInfoProvider {
 
     /// Show the switcher bar with slide-up animation and hide navigation assist
     @objc public func showSwitcherBar() {
+        showSwitcherBar(choosingBar: true)
+    }
+
+    /// - Parameter choosingBar: whether this is the bar being chosen, rather than
+    ///   the side column coming back over an app that has room for it again.
+    private func showSwitcherBar(choosingBar: Bool) {
         guard let hostingController = hostingController else { return }
         
         DispatchQueue.main.async {
@@ -2328,7 +2686,7 @@ class AppInfoProvider {
             
             self.isSwitcherBarVisible = true
             // The other half of the same choice — see `hideSwitcherBar`.
-            self.setPrefersFloatingButton(false)
+            if choosingBar { self.setPrefersFloatingButton(false) }
             self.refreshOrientationLock()
             self.updateDockFrame(animated: false)
             NotificationCenter.default.post(name: .multitaskBarVisibilityChanged, object: nil)
@@ -2362,10 +2720,13 @@ class AppInfoProvider {
 
     /// Whether the bottom swipe is the chosen control rather than the floating button.
     ///
-    /// On by default, so `bool(forKey:)` — which reads a missing key as false — is not
-    /// enough on its own. `LCSettingsView` declares the same default for the picker.
+    /// Read with a default, as `bool(forKey:)` reads a missing key as false: the
+    /// swipe, except on an iPhone Duo, which starts with the floating button
+    /// (`FlekDeviceModel.usesBottomSwipeByDefault`, which the picker in
+    /// `LCSettingsView` takes its default from too).
     private var isSwipeZoneEnabled: Bool {
-        LCUtils.appGroupUserDefault.object(forKey: "LCMultitaskHomeBar") as? Bool ?? true
+        LCUtils.appGroupUserDefault.object(forKey: "LCMultitaskHomeBar") as? Bool
+            ?? FlekDeviceModel.usesBottomSwipeByDefault
     }
 
     /// Put the swipe zone up along the bottom edge of `host`.
@@ -2446,7 +2807,10 @@ class AppInfoProvider {
 
     // MARK: - Navigation Assist Button
     
-    private func showNavAssist(in window: UIWindow, animated: Bool = true) {
+    /// - Parameter stashPoint: where, in `window`, the button that put the side
+    ///   column away was: the floating button then starts tucked into the side the
+    ///   column stood against, level with it. Nil for every other way it appears.
+    private func showNavAssist(in window: UIWindow, animated: Bool = true, stashedAt stashPoint: CGPoint? = nil) {
         // Remove any existing nav assist button to prevent duplicates
         navAssistButton?.removeFromSuperview()
         navAssistButton = nil
@@ -2472,25 +2836,41 @@ class AppInfoProvider {
         host.addSubview(button)
         self.navAssistButton = button
         // A fresh button starts halfway down the right of the user's view, whichever
-        // layout edge that currently is.
-        self.navAssistViewEdge = .right
-        self.navAssistAlongFraction = 0.5
+        // layout edge that currently is — unless it is taking the place of a side
+        // column just put away, when it starts tucked into the column's side where
+        // the column's hide button was, as if that button had gone into the edge.
+        let stashedEdge = stashPoint == nil ? nil : placedSideColumnEdge
+        if let stashPoint, let stashedEdge {
+            let point = host.convert(stashPoint, from: window)
+            let range = navAssistAlongRange(for: stashedEdge, in: host.bounds, insets: host.safeAreaInsets)
+            let along = stashedEdge == .left || stashedEdge == .right ? point.y : point.x
+            self.rememberScreenPlacement(edge: stashedEdge, fraction: navAssistFraction(of: along, in: range))
+            self.navAssistFollowsSideBar = false
+        } else {
+            // Above the app's tabs instead, where an iPhone Duo stands them down
+            // the right and halfway down would be over them.
+            self.placeNavAssistClearOfSideBar(in: host)
+            self.navAssistFollowsSideBar = true
+        }
         // Placed only now that it has a host: its position is measured in that
         // host's space, and the host is not necessarily `window`.
-        self.placeNavAssist(button, stashed: false, animated: false)
+        self.placeNavAssist(button, stashed: stashedEdge != nil, animated: false)
         // Floating button now on stage → allow rotation.
         self.refreshOrientationLock()
 
+        // As placing it left it: opaque, or see-through when tucked away.
+        let restingAlpha = button.alpha
         guard animated else {
             // Instant placement (e.g. when revealing behind the switcher overlay
             // as it fades) so the button is already in its final state.
-            button.alpha = 1
+            button.alpha = restingAlpha
             button.transform = .identity
             return
         }
 
         button.alpha = 0
-        button.transform = CGAffineTransform(scaleX: 0.5, y: 0.5)
+        // Tucked away it only fades in, half off the screen as it already is.
+        button.transform = stashedEdge == nil ? CGAffineTransform(scaleX: 0.5, y: 0.5) : .identity
         UIView.animate(
             withDuration: Constants.standardAnimationDuration,
             delay: 0.03,
@@ -2499,13 +2879,13 @@ class AppInfoProvider {
             // Tappable as it arrives, rather than only once it has settled.
             options: [.curveEaseOut, .allowUserInteraction]
         ) {
-            button.alpha = 1
+            button.alpha = restingAlpha
             button.transform = .identity
         }
     }
     
     private func createNavAssistButton() -> UIView {
-        let size = Constants.navAssistSize
+        let size = navAssistSize
         let button = UIView(frame: CGRect(x: 0, y: 0, width: size, height: size))
         
         let blurEffect = UIBlurEffect(style: .systemMaterialDark)
@@ -2584,7 +2964,7 @@ class AppInfoProvider {
     private func snapNavAssistToEdge(_ button: UIView, animated: Bool) {
         guard let screenBounds = navAssistHostBounds(for: button) else { return }
         let margin = Constants.navAssistMargin
-        let halfSize = Constants.navAssistSize / 2
+        let halfSize = navAssistSize / 2
         let stashThreshold: CGFloat = halfSize + margin // How close to edge before stashing
 
         // Every edge is dockable in either orientation. The edge is remembered and
@@ -2613,6 +2993,7 @@ class AppInfoProvider {
         }
 
         rememberScreenPlacement(edge: edge, fraction: navAssistFraction(of: along, in: range))
+        navAssistFollowsSideBar = false
         placeNavAssist(button, in: screenBounds, stashed: distance(to: edge) < stashThreshold, animated: animated)
     }
 
@@ -2626,14 +3007,24 @@ class AppInfoProvider {
     /// left — the enum names are inverted against `UIDeviceOrientation`, see
     /// UIOrientation.h), which puts the phone's top side at the picture's right:
     /// one step.
+    ///
+    /// Against the phone, not the display: a display mounted on its side in the
+    /// phone — the iPhone Duo's inner one — has its interface turned that much
+    /// already when it is the right way up to the user, and without taking that
+    /// off, opening the phone read as a quarter-turn of the phone that never
+    /// happened. The floating button went over to the bottom edge, its symbol
+    /// lying on its side.
     private var interfaceRotationSteps: Int {
         let scene = navAssistButton?.window?.windowScene ?? keyWindow?.windowScene
+        let steps: Int
         switch scene?.interfaceOrientation {
-        case .landscapeLeft:      return 1
-        case .portraitUpsideDown: return 2
-        case .landscapeRight:     return 3
-        default:                  return 0
+        case .landscapeLeft:      steps = 1
+        case .portraitUpsideDown: steps = 2
+        case .landscapeRight:     steps = 3
+        default:                  steps = 0
         }
+        let mounting = scene.map { FlekDeviceModel.displayMountingSteps(of: $0.screen) } ?? 0
+        return (steps - mounting + 4) % 4
     }
 
     /// Quarter-turns the phone itself is being held at, from the same zero.
@@ -2738,7 +3129,7 @@ class AppInfoProvider {
     /// margin at both ends.
     private func navAssistAlongRange(for edge: ScreenEdge, in screenBounds: CGRect, insets safeArea: UIEdgeInsets) -> ClosedRange<CGFloat> {
         let margin = Constants.navAssistMargin
-        let halfSize = Constants.navAssistSize / 2
+        let halfSize = navAssistSize / 2
         let lower: CGFloat
         let upper: CGFloat
         switch edge {
@@ -2769,7 +3160,7 @@ class AppInfoProvider {
         guard let screenBounds = bounds ?? navAssistHostBounds(for: button),
               screenBounds.width > 0, screenBounds.height > 0 else { return }
         let margin = Constants.navAssistMargin
-        let halfSize = Constants.navAssistSize / 2
+        let halfSize = navAssistSize / 2
         // The physical side the button is parked on, read as the screen edge it
         // shows up as in the orientation the interface is in right now.
         let placement = currentScreenPlacement()
@@ -2784,9 +3175,13 @@ class AppInfoProvider {
         // Resting position when docked to an edge ignores that edge's safe-area
         // inset so the button can sit right against the physical edge (the notch
         // inset on the sides, and the home-indicator inset at the bottom, would
-        // otherwise push it far inward in landscape).
-        let edgeMinX = margin + halfSize
-        let edgeMaxX = screenBounds.width - margin - halfSize
+        // otherwise push it far inward in landscape). Except on the side an iPhone
+        // Duo's side column stands on: there it sits on the column's own line, as
+        // far in as the column's buttons and the app's side bar are centred.
+        let columnEdge = Self.sideColumnEdge(for: keyWindow?.traitCollection)
+        let edgeMinX = columnEdge == .left ? FlekTheme.sideBarCentreInset : margin + halfSize
+        let edgeMaxX = screenBounds.width
+            - (columnEdge == .right ? FlekTheme.sideBarCentreInset : margin + halfSize)
         let edgeMinY = margin + halfSize
         let edgeMaxY = screenBounds.height - margin - halfSize
 
@@ -2851,7 +3246,7 @@ class AppInfoProvider {
     }
     
     private func stashNavAssist(_ button: UIView, in screenBounds: CGRect, edge: ScreenEdge, along: CGFloat, animated: Bool) {
-        let size = Constants.navAssistSize
+        let size = navAssistSize
         // Show half the button off the edge; the chevron is positioned in the
         // visible half (below) so it stays fully on-screen.
         let visibleAmount: CGFloat = size * 0.50
@@ -3851,6 +4246,7 @@ class AppInfoProvider {
         // here — after any rotation — to match the portrait overlay it sits behind.
         captureSpringboardSnapshot()
         refreshCachedSafeAreaInsets()
+        refreshSwitcherSideColumn()
         // Sync the preference to whatever control is actually active right now,
         // so the overlay's toggle reflects the current state — the user may have
         // switched between the bar and the floating button in-app since it was
@@ -4092,7 +4488,7 @@ class AppInfoProvider {
     private func applyPreferredControlInstant() {
         guard isDockEnabled(), !isHomeState, hasForegroundAppWindow(),
               let keyWindow = self.keyWindow else { return }
-        if prefersFloatingButton {
+        if usesFloatingButton {
             // Floating button mode: keep the bar hidden, show the button now.
             isSwitcherBarVisible = false
             for (_, controller) in internalPageControllers {
@@ -4126,10 +4522,11 @@ class AppInfoProvider {
     /// shows the floating button or the switcher bar as chosen.
     func applyPreferredControl() {
         guard isDockEnabled(), isVisible else { return }
-        if prefersFloatingButton {
-            if isSwitcherBarVisible { hideSwitcherBar() }
+        // Puts up what is already chosen, so chooses nothing itself.
+        if usesFloatingButton {
+            if isSwitcherBarVisible { hideSwitcherBar(choosingFloatingButton: false) }
         } else {
-            if !isSwitcherBarVisible { showSwitcherBar() }
+            if !isSwitcherBarVisible { showSwitcherBar(choosingBar: false) }
         }
     }
 
@@ -4601,6 +4998,15 @@ struct SwitcherBarContentView: View {
 
     
     var body: some View {
+        if dockManager.isSideColumnBar {
+            sideColumnContent
+        } else {
+            edgeBarContent
+        }
+    }
+
+    /// The bar lying along an edge: its row of buttons on the black strip.
+    private var edgeBarContent: some View {
         activeBarContent
         // Make the bar buttons 10% larger (scales the glass pills + glyphs uniformly).
         .scaleEffect(MultitaskDockManager.Constants.barContentScale)
@@ -4628,16 +5034,80 @@ struct SwitcherBarContentView: View {
         }
     }
     
+    // MARK: - Actions (shared by the row and the side column)
+
+    private func hideBar() {
+        MultitaskDockManager.buttonHaptic()
+        dockManager.hideSwitcherBar()
+    }
+
+    private func toggleAppSwitcher() {
+        MultitaskDockManager.buttonHaptic()
+        if dockManager.isAppSwitcherOpen {
+            dockManager.dismissAppSwitcher()
+        } else {
+            dockManager.showAppSwitcher()
+        }
+    }
+
+    private func goHome() {
+        MultitaskDockManager.buttonHaptic()
+        homeBounce += 1
+        dockManager.goHome()
+    }
+
+    // MARK: - Side Column (iPhone Duo)
+
+    /// The bar standing upright in the column beside an iPhone Duo's status bar:
+    /// hide, the app in front and home, top to bottom, in circles the size of iOS's
+    /// own buttons in that column. No black strip behind them: the column is the
+    /// status bar's own strip, which apps keep their content out of.
+    private var sideColumnContent: some View {
+        let size = FlekTheme.sideBarButtonSize
+        let width = FlekTheme.sideBarWidth
+        let glyph = FlekTheme.sideBarButtonGlyphSize
+        return VStack(spacing: MultitaskDockManager.Constants.barSpacing) {
+            BarControlButton(action: hideBar) {
+                // Pointing the way the column goes when it hides: out past the edge.
+                Image(systemName: dockManager.isSideColumnOnLeft ? "chevron.left" : "chevron.right")
+                    .foregroundColor(.barGlyph)
+                    .font(.system(size: glyph, weight: .regular))
+                    .frame(width: size, height: size)
+                    .stableBarGlass(capsule: false)
+                    .frame(width: width)
+            }
+            .accessibilityLabel("Hide Switcher Bar")
+
+            BarControlButton(action: toggleAppSwitcher) {
+                FrontmostAppIcon(size: FlekTheme.sideBarButtonIconSize)
+                    .frame(width: size, height: size)
+                    .stableBarGlass(capsule: false)
+                    .frame(width: width)
+            }
+            .accessibilityLabel("App Switcher")
+            .modifier(QuickSwitchSwipe())
+
+            BarControlButton(action: goHome) {
+                Image(systemName: "app")
+                    .foregroundColor(.barGlyph)
+                    .font(.system(size: glyph, weight: .regular))
+                    .modifier(SymbolBounce(value: homeBounce))
+                    .frame(width: size, height: size)
+                    .stableBarGlass(capsule: false)
+                    .frame(width: width)
+            }
+            .accessibilityLabel("Home")
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
     // MARK: - Active State (app running in foreground)
     private var activeBarContent: some View {
         HStack(spacing: MultitaskDockManager.Constants.barSpacing) {
             // Left: Hide button
-            BarControlButton {
-                MultitaskDockManager.buttonHaptic()
-                dockManager.hideSwitcherBar()
-            } label: {
+            BarControlButton(action: hideBar) {
                 Image(systemName: "chevron.down")
-                    .foregroundColor(.white)
+                    .foregroundColor(.barGlyph)
                     .font(.system(size: 14, weight: .semibold))
                     .frame(width: MultitaskDockManager.Constants.barButtonSize,
                            height: MultitaskDockManager.Constants.barButtonSize)
@@ -4646,27 +5116,16 @@ struct SwitcherBarContentView: View {
             .accessibilityLabel("Hide Switcher Bar")
 
             // Middle: App switcher button
-            BarControlButton {
-                MultitaskDockManager.buttonHaptic()
-                if dockManager.isAppSwitcherOpen {
-                    dockManager.dismissAppSwitcher()
-                } else {
-                    dockManager.showAppSwitcher()
-                }
-            } label: {
+            BarControlButton(action: toggleAppSwitcher) {
                 BarAppButtonLabel(showsCloseAll: dockManager.barShowsCloseAll)
             }
             .accessibilityLabel("App Switcher")
             .modifier(QuickSwitchSwipe())
 
             // Right: Home button
-            BarControlButton {
-                MultitaskDockManager.buttonHaptic()
-                homeBounce += 1
-                dockManager.goHome()
-            } label: {
+            BarControlButton(action: goHome) {
                 Image(systemName: "app")
-                    .foregroundColor(.white)
+                    .foregroundColor(.barGlyph)
                     .font(.system(size: 16, weight: .medium))
                     .modifier(SymbolBounce(value: homeBounce))
                     .frame(width: MultitaskDockManager.Constants.barButtonSize,
@@ -4701,6 +5160,56 @@ struct SwitcherBarContentView: View {
     }
 }
 
+// MARK: - Frontmost App Icon
+/// The app in front drawn as its icon alone: the side column's app button, which
+/// has no room for the name the row's capsule carries.
+@available(iOS 16.0, *)
+private struct FrontmostAppIcon: View {
+    @EnvironmentObject var dockManager: MultitaskDockManager
+    @Environment(\.layoutDirection) private var layoutDirection
+    let size: CGFloat
+
+    private var frontmostApp: DockAppModel? {
+        if let uuid = dockManager.quickSwitchLanding ?? dockManager.frontmostAppUUID {
+            return dockManager.apps.first { $0.appUUID == uuid }
+        }
+        return dockManager.apps.last
+    }
+
+    /// The home column's icon shape, at this size.
+    private var cornerRadius: CGFloat {
+        MultitaskHomeIcon.cornerRadius * size / FlekTheme.sideBarAppIconSize
+    }
+
+    var body: some View {
+        // One icon per app, so a switch along the bar carries this one out
+        // through the icon's outline the way its window went, and the next in.
+        ZStack {
+            icon(for: frontmostApp)
+                .id(frontmostApp?.appUUID)
+                .transition(dockManager.barAppTransition(layoutDirection))
+        }
+        .frame(width: size, height: size)
+        .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
+    }
+
+    @ViewBuilder
+    private func icon(for app: DockAppModel?) -> some View {
+        if let app, let icon = SwitcherBarContentView.cachedIcon(for: app) {
+            Image(uiImage: icon)
+                .resizable()
+                .aspectRatio(contentMode: .fit)
+                .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
+                .frame(width: size, height: size)
+        } else {
+            Image(systemName: "app.fill")
+                .foregroundColor(.barGlyph)
+                .font(.system(size: size * 0.45))
+                .frame(width: size, height: size)
+        }
+    }
+}
+
 // MARK: - Frontmost App Icon Label
 @available(iOS 16.0, *)
 struct FrontmostAppIconLabel: View {
@@ -4729,7 +5238,7 @@ struct FrontmostAppIconLabel: View {
             .clipped()
 
             Image(systemName: "chevron.up")
-                .foregroundColor(.white.opacity(0.6))
+                .foregroundColor(Color.barGlyph.opacity(0.6))
                 .font(.system(size: 10, weight: .semibold))
                 .frame(width: MultitaskDockManager.Constants.barMenuChevronWidth)
         }
@@ -4799,7 +5308,7 @@ private struct CloseAllLabel: View {
                 .font(.system(size: 14, weight: .medium))
                 .lineLimit(1)
         }
-        .foregroundColor(.white)
+        .foregroundColor(.barGlyph)
     }
 }
 
@@ -4831,7 +5340,7 @@ private struct AppIconAndName: View {
                            height: MultitaskDockManager.Constants.barMenuIconSize)
             } else {
                 Image(systemName: "app.fill")
-                    .foregroundColor(.white)
+                    .foregroundColor(.barGlyph)
                     .font(.system(size: 18))
                     .frame(width: MultitaskDockManager.Constants.barMenuIconSize,
                            height: MultitaskDockManager.Constants.barMenuIconSize)
@@ -4841,7 +5350,7 @@ private struct AppIconAndName: View {
             // stops, and the name is what gives way: it shrinks first, and only
             // truncates once there is nothing left to shrink.
             Text(app?.appName ?? "App")
-                .foregroundColor(.white)
+                .foregroundColor(.barGlyph)
                 .font(.system(size: 14, weight: .medium))
                 .lineLimit(1)
                 .minimumScaleFactor(0.7)
@@ -5077,6 +5586,7 @@ struct AppSwitcherOverlay: View {
     /// Bumped on press to bounce each glyph; see `SymbolBounce`.
     @State private var closeBounce = 0
     @State private var homeBounce = 0
+    @Environment(\.layoutDirection) private var layoutDirection
     /// Opened over the bar: the chin starts out as the bar is, with nothing of it
     /// to arrive, and only its app button changes. See `presentAppSwitcher`.
     let opensOverBar: Bool
@@ -5120,8 +5630,22 @@ struct AppSwitcherOverlay: View {
         let natural = cardWidth * (contentHeight / screen.width)
         // Everything the column spends outside the image: the top spacer, the header
         // row and the gap under it, the minimum gap above the chin, and the chin.
-        let chrome = (insets.top + 12) + (cardHeaderHeight + 8) + 20 + (dockManager.barFlatRegion + 20)
+        let chrome = (insets.top + 12) + (cardHeaderHeight + 8) + 20 + chinReserve
         return min(natural, max(screen.height - chrome, 1))
+    }
+
+    /// What the column keeps free under the cards: the chin's footprint, or with the
+    /// controls in the side column, only the home indicator's band.
+    private var chinReserve: CGFloat {
+        dockManager.isSwitcherSideColumn
+            ? dockManager.cachedSafeAreaInsets.bottom
+            : dockManager.barFlatRegion + 20
+    }
+
+    /// Whether the side column is on the layout's leading side, which is the screen's
+    /// left only in a left-to-right layout.
+    private var sideColumnIsLeading: Bool {
+        dockManager.isSwitcherSideColumnOnLeft != (layoutDirection == .rightToLeft)
     }
 
     // How far the cards slide left and the buttons slide down when the user taps
@@ -5265,7 +5789,7 @@ struct AppSwitcherOverlay: View {
                 // Reserve the chin's footprint — the controls live inside it, as a
                 // separate bottom-anchored layer below — so the cards stop above it.
                 Spacer()
-                    .frame(height: dockManager.barFlatRegion + 20)
+                    .frame(height: chinReserve)
             }
             // Dead while the switcher animates out. Without this a second tap
             // during the ~0.3s exit could land on a card that is still sliding
@@ -5276,126 +5800,216 @@ struct AppSwitcherOverlay: View {
             // below doesn't: it stands over the bar it is handing back to.
             .scaleEffect(dockManager.isDismissingAppSwitcher ? 1.05 : 1)
 
-            // The chin: the switcher bar itself, anchored flush to the very bottom
-            // edge with exactly the real bar's thickness (bar height + bottom safe
-            // area), holding the overlay's three controls the way the real bar holds
-            // its own. Left toggles the bar (the action this chin used to carry as a
-            // full-width "Hide Switcher Bar" label), middle closes everything, right
-            // goes home. As its own bottom-aligned ZStack layer it can't be shifted
-            // by the VStack's flow, so its height matches the real bar precisely.
-            HStack(spacing: MultitaskDockManager.Constants.barSpacing) {
-                Button(action: {
-                    MultitaskDockManager.buttonHaptic()
-                    // A spring, not a curve: the symbol replace below takes its
-                    // timing from this transaction, and iOS's own symbol swaps
-                    // settle with a little spring rather than easing flatly.
-                    withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) {
-                        dockManager.setPrefersFloatingButton(!dockManager.prefersFloatingButton)
-                    }
-                }) {
-                    Image(systemName: dockManager.prefersFloatingButton ? "chevron.up" : "chevron.down")
-                        .foregroundColor(.white)
-                        .font(.system(size: 14, weight: .semibold))
-                        .modifier(SymbolReplaceTransition())
-                        .frame(width: MultitaskDockManager.Constants.barButtonSize,
-                               height: MultitaskDockManager.Constants.barButtonSize)
-                        .stableBarGlass(capsule: false)
-                        // The whole circle takes the tap, not just the glyph.
-                        // Without it the ring around a chevron is see-through to
-                        // hit testing, and a near-miss reaches the backdrop
-                        // behind — which returns to the springboard.
-                        .contentShape(Circle())
-                }
-                .buttonStyle(BarControlButtonStyle())
-                .accessibilityLabel(dockManager.prefersFloatingButton ? "Use Switcher Bar" : "Hide Switcher Bar")
-                .modifier(ChinControlEntrance(shown: isPresented || opensOverBar, index: 0, from: -1))
-
-                Button(action: {
-                    MultitaskDockManager.buttonHaptic()
-                    closeBounce += 1
-                    showCloseAllConfirm = true
-                }) {
-                    // The bar's app button, which turns into Close all as the switcher
-                    // opens over it; on the way home it stays Close all to the end.
-                    BarAppButtonLabel(showsCloseAll: dockManager.barShowsCloseAll || exiting,
-                                      closeBounce: closeBounce)
-                        .contentShape(Capsule())
-                }
-                .buttonStyle(BarControlButtonStyle())
-                .modifier(ChinControlEntrance(shown: isPresented || opensOverBar, index: 1, from: 0))
-                .alert("Close All Apps?", isPresented: $showCloseAllConfirm) {
-                    Button("Cancel", role: .cancel) { }
-                    Button("Close All", role: .destructive) {
-                        dockManager.closeAllApps()
-                    }
-                } message: {
-                    Text("This closes every open app.")
-                }
-
-                Button(action: {
-                    homeBounce += 1
-                    exitToSpringboard()
-                }) {
-                    Image(systemName: "app")
-                        .foregroundColor(.white)
-                        .font(.system(size: 16, weight: .medium))
-                        .modifier(SymbolBounce(value: homeBounce))
-                        .frame(width: MultitaskDockManager.Constants.barButtonSize,
-                               height: MultitaskDockManager.Constants.barButtonSize)
-                        .stableBarGlass(capsule: false)
-                        .contentShape(Circle())
-                }
-                .buttonStyle(BarControlButtonStyle())
-                .accessibilityLabel("Home")
-                .modifier(ChinControlEntrance(shown: isPresented || opensOverBar, index: 2, from: 1))
+            // The switcher's three controls: the chin along the bottom, or where the
+            // bar stands beside an iPhone Duo's status bar, the same column there.
+            if dockManager.isSwitcherSideColumn {
+                sideColumnControls
+            } else {
+                bottomChin
             }
-            // Sized and spaced exactly as the real bar sizes and spaces its own
-            // row — same button metric, same 10pt gaps, same 1.1 scale-up, same
-            // side padding — so the controls don't change size as the switcher
-            // opens over the bar or dismisses back into it.
-            .scaleEffect(MultitaskDockManager.Constants.barContentScale)
-            .padding(.horizontal, MultitaskDockManager.Constants.barHPadding)
-            // Centred in the flat solid body — the block from the flat-top line down
-            // to the screen edge — exactly as the real bar centres its own controls.
-            // `barFlatRegion` floors at that same button height, so the row always
-            // has room: on a device with no bottom inset and a shallow corner radius
-            // the natural region is far too short to hold it.
-            .frame(maxWidth: .infinity)
-            .frame(height: dockManager.barFlatRegion, alignment: .center)
-            .padding(.top, dockManager.barCornerRadiusActive)
-            // Same concave rounded top corners and height as the real switcher bar —
-            // including the rounding amount from the Settings slider, so this chin
-            // always matches it. Solid black while the bar is the active control;
-            // once the user taps the arrow (floating-button mode), the black fades
-            // out to reveal a translucent ultra-thin-material bar underneath.
-            // Layering the black over the material and animating its opacity lets
-            // the two states cross-fade smoothly when the toggle flips.
-            .background {
-                BarTopBar(radius: dockManager.barCornerRadiusActive,
-                          curve: dockManager.barCornerRadiusActive * dockManager.barLedgeAmountActive)
-                    .fill(.thinMaterial)
-                    .environment(\.colorScheme, .dark)
-                    .overlay {
-                        BarTopBar(radius: dockManager.barCornerRadiusActive,
-                                  curve: dockManager.barCornerRadiusActive * dockManager.barLedgeAmountActive)
-                            .fill(Color.black)
-                            .opacity(dockManager.prefersFloatingButton ? 0 : 1)
-                    }
-                    .animation(.easeInOut(duration: 0.32), value: dockManager.barLedgeAmountActive)
-                    .animation(.easeInOut(duration: 0.25), value: dockManager.prefersFloatingButton)
-                    .ignoresSafeArea()
-            }
-            .offset(y: exiting ? exitButtonOffset : 0)
-            // Inert during the exit animation, like the cards above. This chin is a
-            // separate ZStack sibling, so the cards' own allowsHitTesting guard
-            // doesn't reach it — without this, a second tap landing on the arrow
-            // while the switcher slides away would flip the persisted preference.
-            .allowsHitTesting(!exiting)
         }
         .ignoresSafeArea()
+        .alert("Close All Apps?", isPresented: $showCloseAllConfirm) {
+            Button("Cancel", role: .cancel) { }
+            Button("Close All", role: .destructive) {
+                dockManager.closeAllApps()
+            }
+        } message: {
+            Text("This closes every open app.")
+        }
         // Note: background-tap-to-dismiss is deliberately NOT here on the ZStack.
         // It lives on the backdrop layer above, so it is governed by hit testing
         // rather than by competing with descendant controls' gestures. See there.
+    }
+
+    // MARK: - Controls (shared by the chin and the side column)
+
+    private func toggleBarPreference() {
+        MultitaskDockManager.buttonHaptic()
+        // A spring, not a curve: the symbol replace below takes its
+        // timing from this transaction, and iOS's own symbol swaps
+        // settle with a little spring rather than easing flatly.
+        withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) {
+            dockManager.setPrefersFloatingButton(!dockManager.prefersFloatingButton)
+        }
+    }
+
+    private func askToCloseAll() {
+        MultitaskDockManager.buttonHaptic()
+        closeBounce += 1
+        showCloseAllConfirm = true
+    }
+
+    private func goHome() {
+        homeBounce += 1
+        exitToSpringboard()
+    }
+
+    /// The chin: the switcher bar itself, anchored flush to the very bottom
+    /// edge with exactly the real bar's thickness (bar height + bottom safe
+    /// area), holding the overlay's three controls the way the real bar holds
+    /// its own. Left toggles the bar (the action this chin used to carry as a
+    /// full-width "Hide Switcher Bar" label), middle closes everything, right
+    /// goes home. As its own bottom-aligned ZStack layer it can't be shifted
+    /// by the VStack's flow, so its height matches the real bar precisely.
+    private var bottomChin: some View {
+        HStack(spacing: MultitaskDockManager.Constants.barSpacing) {
+            Button(action: toggleBarPreference) {
+                Image(systemName: dockManager.prefersFloatingButton ? "chevron.up" : "chevron.down")
+                    .foregroundColor(.barGlyph)
+                    .font(.system(size: 14, weight: .semibold))
+                    .modifier(SymbolReplaceTransition())
+                    .frame(width: MultitaskDockManager.Constants.barButtonSize,
+                           height: MultitaskDockManager.Constants.barButtonSize)
+                    .stableBarGlass(capsule: false)
+                    // The whole circle takes the tap, not just the glyph.
+                    // Without it the ring around a chevron is see-through to
+                    // hit testing, and a near-miss reaches the backdrop
+                    // behind — which returns to the springboard.
+                    .contentShape(Circle())
+            }
+            .buttonStyle(BarControlButtonStyle())
+            .accessibilityLabel(dockManager.prefersFloatingButton ? "Use Switcher Bar" : "Hide Switcher Bar")
+            .modifier(ChinControlEntrance(shown: isPresented || opensOverBar, index: 0, from: -1))
+
+            Button(action: askToCloseAll) {
+                // The bar's app button, which turns into Close all as the switcher
+                // opens over it; on the way home it stays Close all to the end.
+                BarAppButtonLabel(showsCloseAll: dockManager.barShowsCloseAll || exiting,
+                                  closeBounce: closeBounce)
+                    .contentShape(Capsule())
+            }
+            .buttonStyle(BarControlButtonStyle())
+            .modifier(ChinControlEntrance(shown: isPresented || opensOverBar, index: 1, from: 0))
+
+            Button(action: goHome) {
+                Image(systemName: "app")
+                    .foregroundColor(.barGlyph)
+                    .font(.system(size: 16, weight: .medium))
+                    .modifier(SymbolBounce(value: homeBounce))
+                    .frame(width: MultitaskDockManager.Constants.barButtonSize,
+                           height: MultitaskDockManager.Constants.barButtonSize)
+                    .stableBarGlass(capsule: false)
+                    .contentShape(Circle())
+            }
+            .buttonStyle(BarControlButtonStyle())
+            .accessibilityLabel("Home")
+            .modifier(ChinControlEntrance(shown: isPresented || opensOverBar, index: 2, from: 1))
+        }
+        // Sized and spaced exactly as the real bar sizes and spaces its own
+        // row — same button metric, same 10pt gaps, same 1.1 scale-up, same
+        // side padding — so the controls don't change size as the switcher
+        // opens over the bar or dismisses back into it.
+        .scaleEffect(MultitaskDockManager.Constants.barContentScale)
+        .padding(.horizontal, MultitaskDockManager.Constants.barHPadding)
+        // Centred in the flat solid body — the block from the flat-top line down
+        // to the screen edge — exactly as the real bar centres its own controls.
+        // `barFlatRegion` floors at that same button height, so the row always
+        // has room: on a device with no bottom inset and a shallow corner radius
+        // the natural region is far too short to hold it.
+        .frame(maxWidth: .infinity)
+        .frame(height: dockManager.barFlatRegion, alignment: .center)
+        .padding(.top, dockManager.barCornerRadiusActive)
+        // Same concave rounded top corners and height as the real switcher bar —
+        // including the rounding amount from the Settings slider, so this chin
+        // always matches it. Solid black while the bar is the active control;
+        // once the user taps the arrow (floating-button mode), the black fades
+        // out to reveal a translucent ultra-thin-material bar underneath.
+        // Layering the black over the material and animating its opacity lets
+        // the two states cross-fade smoothly when the toggle flips.
+        .background {
+            BarTopBar(radius: dockManager.barCornerRadiusActive,
+                      curve: dockManager.barCornerRadiusActive * dockManager.barLedgeAmountActive)
+                .fill(.thinMaterial)
+                .environment(\.colorScheme, .dark)
+                .overlay {
+                    BarTopBar(radius: dockManager.barCornerRadiusActive,
+                              curve: dockManager.barCornerRadiusActive * dockManager.barLedgeAmountActive)
+                        .fill(Color.black)
+                        .opacity(dockManager.prefersFloatingButton ? 0 : 1)
+                }
+                .animation(.easeInOut(duration: 0.32), value: dockManager.barLedgeAmountActive)
+                .animation(.easeInOut(duration: 0.25), value: dockManager.prefersFloatingButton)
+                .ignoresSafeArea()
+        }
+        .offset(y: exiting ? exitButtonOffset : 0)
+        // Inert during the exit animation, like the cards above. This chin is a
+        // separate ZStack sibling, so the cards' own allowsHitTesting guard
+        // doesn't reach it — without this, a second tap landing on the arrow
+        // while the switcher slides away would flip the persisted preference.
+        .allowsHitTesting(!exiting)
+    }
+
+    /// The controls standing in the side column beside an iPhone Duo's status bar,
+    /// as the bar's own buttons do there: the same circles in the same places, so
+    /// the switcher opening over the bar changes only what they show. Nothing
+    /// behind them, as nothing is behind the bar's.
+    private var sideColumnControls: some View {
+        let size = FlekTheme.sideBarButtonSize
+        let width = FlekTheme.sideBarWidth
+        let glyph = FlekTheme.sideBarButtonGlyphSize
+        // The bar leaves through the edge beside it and comes back in away from it.
+        let pointsLeft = dockManager.prefersFloatingButton != dockManager.isSwitcherSideColumnOnLeft
+        return VStack(spacing: MultitaskDockManager.Constants.barSpacing) {
+            Button(action: toggleBarPreference) {
+                Image(systemName: pointsLeft ? "chevron.left" : "chevron.right")
+                    .foregroundColor(.barGlyph)
+                    .font(.system(size: glyph, weight: .regular))
+                    .modifier(SymbolReplaceTransition())
+                    .frame(width: size, height: size)
+                    .stableBarGlass(capsule: false)
+                    // Across the column's whole width, not just the circle: a
+                    // near-miss would otherwise reach the backdrop behind, which
+                    // returns to the springboard.
+                    .frame(width: width)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(BarControlButtonStyle())
+            .accessibilityLabel(dockManager.prefersFloatingButton ? "Use Switcher Bar" : "Hide Switcher Bar")
+            .modifier(ChinControlEntrance(shown: isPresented, index: 0, from: 0))
+
+            Button(action: askToCloseAll) {
+                Image(systemName: "xmark")
+                    .foregroundColor(.barGlyph)
+                    .font(.system(size: glyph, weight: .regular))
+                    .modifier(SymbolBounce(value: closeBounce))
+                    .frame(width: size, height: size)
+                    .stableBarGlass(capsule: false)
+                    .frame(width: width)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(BarControlButtonStyle())
+            .accessibilityLabel("Close all")
+            .modifier(ChinControlEntrance(shown: isPresented, index: 1, from: 0))
+
+            Button(action: goHome) {
+                Image(systemName: "app")
+                    .foregroundColor(.barGlyph)
+                    .font(.system(size: glyph, weight: .regular))
+                    .modifier(SymbolBounce(value: homeBounce))
+                    .frame(width: size, height: size)
+                    .stableBarGlass(capsule: false)
+                    .frame(width: width)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(BarControlButtonStyle())
+            .accessibilityLabel("Home")
+            .modifier(ChinControlEntrance(shown: isPresented, index: 2, from: 0))
+        }
+        // Where the bar's column stands: centred on the status bar's, its foot as
+        // far from the bottom of the display as the home screen's. Measured from the
+        // display's edges, not the safe area's, which the status bar's strip is not
+        // part of.
+        .padding(sideColumnIsLeading ? .leading : .trailing,
+                 FlekTheme.sideBarCentreInset - width / 2)
+        .padding(.bottom, FlekTheme.bottomBarScreenMargin)
+        .frame(maxWidth: .infinity, maxHeight: .infinity,
+               alignment: sideColumnIsLeading ? .bottomLeading : .bottomTrailing)
+        .ignoresSafeArea()
+        // Fading into the home screen's own column, which stands in the same
+        // place, as the springboard comes through.
+        .opacity(exiting ? 0 : 1)
+        .allowsHitTesting(!exiting)
     }
 
     /// Tapping the background returns to the springboard: cards slide off to the
@@ -6598,6 +7212,35 @@ private extension View {
     }
 }
 
+/// Whether the multitask controls take iOS's own look rather than FlekDeck's:
+/// the system's Liquid Glass, which takes its tone from what is behind it and
+/// answers a touch itself, with glyphs in the label colour of the app's own
+/// appearance. Only on the iPhone Duo, where they stand in the status bar's
+/// column beside iOS's own buttons, and only while Liquid Glass is in use: the
+/// frosted style keeps FlekDeck's look.
+private enum BarControlLook {
+    static var isNative: Bool {
+        guard #available(iOS 26.0, *), FlekDeviceModel.isDuo, SharedModel.isLiquidGlassEnabled else { return false }
+        let style = LCUtils.appGroupUserDefault.string(forKey: FlekDeckKeys.glassStyle)
+        return (style.flatMap(FlekGlassStyle.init(rawValue:)) ?? .liquid) == .liquid
+    }
+
+    /// The app's own appearance. The bar is held dark for FlekDeck's look, which
+    /// would keep iOS's glass and the glyphs on it dark over a light page.
+    @available(iOS 16.0, *)
+    static var colorScheme: ColorScheme {
+        let style = MultitaskDockManager.shared.keyWindow?.traitCollection.userInterfaceStyle
+            ?? UIScreen.main.traitCollection.userInterfaceStyle
+        return style == .dark ? .dark : .light
+    }
+}
+
+private extension Color {
+    /// A multitask control's glyph: white on FlekDeck's own dark glass, the label
+    /// colour on iOS's (`BarControlLook`).
+    static var barGlyph: Color { BarControlLook.isNative ? .primary : .white }
+}
+
 /// See `stableBarGlass(capsule:)`. A modifier, so that a change of glass style
 /// reaches bars already on screen.
 @available(iOS 16.0, *)
@@ -6605,16 +7248,28 @@ private struct StableBarGlass: ViewModifier {
     let capsule: Bool
     @AppStorage(FlekDeckKeys.glassStyle, store: LCUtils.appGroupUserDefault) private var glassStyle: FlekGlassStyle = .liquid
 
-    func body(content: Content) -> some View {
-        if #available(iOS 26.0, *), SharedModel.isLiquidGlassEnabled, glassStyle == .liquid {
-            content.background {
-                StableLiquidGlass(isDark: true, tint: UIColor(white: 1.0, alpha: 0.03))
-            }
-        } else if capsule {
-            content.background(Capsule().fill(Color.white.opacity(0.15)))
-        } else {
-            content.background(Circle().fill(Color.white.opacity(0.15)))
+    // AnyView for the reason `DockPillBackground.body` gives: `glassEffect` is an
+    // iOS 26 type, and an opaque Body would carry it to older runtimes.
+    func body(content: Content) -> AnyView {
+        if #available(iOS 26.0, *), BarControlLook.isNative {
+            // iOS's own glass, as on the buttons beside it in the iPhone Duo's
+            // status bar column, seen in the app's appearance rather than the
+            // bar's: it goes light over a light page and dark over a dark one, and
+            // answers a touch itself.
+            let glass = capsule
+                ? AnyView(content.glassEffect(.regular.interactive(), in: .capsule))
+                : AnyView(content.glassEffect(.regular.interactive(), in: .circle))
+            return AnyView(glass.environment(\.colorScheme, BarControlLook.colorScheme))
         }
+        if #available(iOS 26.0, *), SharedModel.isLiquidGlassEnabled, glassStyle == .liquid {
+            return AnyView(content.background {
+                StableLiquidGlass(isDark: true, tint: UIColor(white: 1.0, alpha: 0.03))
+            })
+        }
+        if capsule {
+            return AnyView(content.background(Capsule().fill(Color.white.opacity(0.15))))
+        }
+        return AnyView(content.background(Circle().fill(Color.white.opacity(0.15))))
     }
 }
 
@@ -6709,9 +7364,11 @@ private struct BarControlButton<Label: View>: View {
     @State private var isPressed = false
 
     var body: some View {
-        label()
-            .scaleEffect(isPressed ? 0.92 : 1)
-            .opacity(isPressed ? 0.75 : 1)
+        // Where the controls wear iOS's glass, the glass answers the press itself.
+        let showsPress = isPressed && !BarControlLook.isNative
+        return label()
+            .scaleEffect(showsPress ? 0.92 : 1)
+            .opacity(showsPress ? 0.75 : 1)
             .animation(.spring(response: 0.25, dampingFraction: 0.7), value: isPressed)
             .contentShape(Rectangle())
             .onPressGesture(onPress: { isPressed = true },
@@ -6732,9 +7389,11 @@ private struct BarControlButton<Label: View>: View {
 
 struct BarControlButtonStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
-        configuration.label
-            .scaleEffect(configuration.isPressed ? 0.92 : 1)
-            .opacity(configuration.isPressed ? 0.75 : 1)
+        // Where the controls wear iOS's glass, the glass answers the press itself.
+        let showsPress = configuration.isPressed && !BarControlLook.isNative
+        return configuration.label
+            .scaleEffect(showsPress ? 0.92 : 1)
+            .opacity(showsPress ? 0.75 : 1)
             .animation(.spring(response: 0.25, dampingFraction: 0.7),
                        value: configuration.isPressed)
     }
@@ -6948,14 +7607,26 @@ final class MultitaskQuickSwitch {
     struct Corners {
         let masksToBounds: Bool
         let curve: CALayerCornerCurve
+        /// For corners that aren't all alike: the window's mask before, and the
+        /// one put on in its place.
+        let mask: CALayer?
+        let cut: CALayer?
 
-        /// Rounds `layer`'s corners to `radius`, on the curve the screen's own
-        /// corners follow, and returns how it was.
-        static func clip(_ layer: CALayer, radius: CGFloat) -> Corners {
-            let was = Corners(masksToBounds: layer.masksToBounds, curve: layer.cornerCurve)
-            layer.masksToBounds = true
-            layer.cornerCurve = .continuous
-            layer.cornerRadius = radius
+        /// Rounds `layer`'s corners to `radii`, on the curve the screen's own
+        /// corners follow, and returns how it was. Alike all round, by the layer's
+        /// own corner radius; otherwise by a mask, a layer rounding only one side.
+        static func clip(_ layer: CALayer, radii: FlekCornerRadii) -> Corners {
+            guard radii != .uniform(radii.topLeft) else {
+                let was = Corners(masksToBounds: layer.masksToBounds, curve: layer.cornerCurve, mask: nil, cut: nil)
+                layer.masksToBounds = true
+                layer.cornerCurve = .continuous
+                layer.cornerRadius = radii.topLeft
+                return was
+            }
+            let cut = FlekCornerRadii.cut(size: layer.bounds.size, from: radii, to: radii)[0].layer
+            cut.position = CGPoint(x: layer.bounds.midX, y: layer.bounds.midY)
+            let was = Corners(masksToBounds: layer.masksToBounds, curve: layer.cornerCurve, mask: layer.mask, cut: cut)
+            layer.mask = cut
             return was
         }
 
@@ -6964,6 +7635,7 @@ final class MultitaskQuickSwitch {
             layer.cornerRadius = 0
             layer.masksToBounds = masksToBounds
             layer.cornerCurve = curve
+            if let cut, layer.mask === cut { layer.mask = mask }
         }
     }
 
@@ -6976,8 +7648,8 @@ final class MultitaskQuickSwitch {
         /// How far apart the window in front and the one coming in are kept: a
         /// screen's length, and a little space between the two.
         var spacing: CGFloat { extent + 20 }
-        /// The screen's corner radius, which the windows keep for the whole swipe.
-        let cornerRadius: CGFloat
+        /// The screen's corners, which the windows keep for the whole swipe.
+        let cornerRadii: FlekCornerRadii
         let currentCorners: Corners
         /// Which side the incoming app was brought out on: 1 for the app before,
         /// coming in from the start of the bar, -1 for the one after.
@@ -7001,11 +7673,11 @@ final class MultitaskQuickSwitch {
         var caughtLanding = false
 
         init(current: UIView, axis: CGVector, extent: CGFloat,
-             cornerRadius: CGFloat, currentCorners: Corners) {
+             cornerRadii: FlekCornerRadii, currentCorners: Corners) {
             self.current = current
             self.axis = axis
             self.extent = extent
-            self.cornerRadius = cornerRadius
+            self.cornerRadii = cornerRadii
             self.currentCorners = currentCorners
         }
     }
@@ -7089,10 +7761,10 @@ extension MultitaskDockManager {
         if offset == 0 { current.transform = .identity }
         // Shaped like the screen from the first moment of the swipe until the
         // window is back at rest, as iOS shows an app being swiped.
-        let cornerRadius = deviceScreenCornerRadius
+        let cornerRadii = deviceScreenCornerRadii
         let drag = MultitaskQuickSwitch.Drag(current: current, axis: axis, extent: extent,
-                                             cornerRadius: cornerRadius,
-                                             currentCorners: .clip(current.layer, radius: cornerRadius))
+                                             cornerRadii: cornerRadii,
+                                             currentCorners: .clip(current.layer, radii: cornerRadii))
         drag.caughtLanding = caughtLanding && caught === current
         run.drag = drag
         showBlurredSpringboard(behind: current, in: host)
@@ -7204,7 +7876,7 @@ extension MultitaskDockManager {
         drag.targetAlpha = view.alpha
         drag.targetIndex = host.subviews.firstIndex(of: view)
         view.layer.removeAllAnimations()
-        drag.targetCorners = .clip(view.layer, radius: drag.cornerRadius)
+        drag.targetCorners = .clip(view.layer, radii: drag.cornerRadii)
         // Just under the window it comes in beside, so nothing else that was
         // behind that one covers it on the way.
         host.insertSubview(view, belowSubview: drag.current)

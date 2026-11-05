@@ -442,6 +442,8 @@ static void LCRecoverLegacyStagedCopies(NSURL *appGroupLC, NSURL *docURL) {
 @property(nonatomic) NSNumber *pipReadyToken;
 /// Raises the Single Mode sheet when the guest is refused the microphone.
 @property(nonatomic) LCGuestCaptureNotice *captureNotice;
+/// Registration on the guest's report of where its own side bar sits.
+@property(nonatomic) NSNumber *sideBarToken;
 @end
 
 /// The device orientation to hand a guest, derived from the orientation UIKit has
@@ -817,6 +819,7 @@ static UIDeviceOrientation LCDeviceOrientationForInterface(UIInterfaceOrientatio
 
     [self beginObservingGuestPiPRequests];
     [self beginObservingGuestCaptureRefusals];
+    [self beginObservingGuestSideBar];
 
     if([self.delegate respondsToSelector:@selector(appSceneVCDidPresentScene:)]) {
         [self.delegate appSceneVCDidPresentScene:self];
@@ -976,6 +979,7 @@ static UIDeviceOrientation LCDeviceOrientationForInterface(UIInterfaceOrientatio
 
     [_audio invalidate];
     [self endObservingGuestPiPRequests];
+    [self endObservingGuestSideBar];
     [_captureNotice invalidate];
     _captureNotice = nil;
 
@@ -1092,6 +1096,43 @@ static UIDeviceOrientation LCDeviceOrientationForInterface(UIInterfaceOrientatio
     if(self.captureNotice) return;
     self.captureNotice = [[LCGuestCaptureNotice alloc] initWithDataUUID:self.dataUUID];
     self.captureNotice.hostViewController = self;
+}
+
+/// Listens for the guest's report of where its own side bar sits.
+///
+/// On an iPhone Duo the app's tab bar and other items stand in the column the
+/// status bar runs down, the one the multitask bar's side column stands in, and
+/// only the app can see where they are. LCGuestSideBar measures them and posts
+/// them here; the dock keeps its column clear of them.
+///
+/// Registered once the guest is running, which is the earliest it can answer.
+- (void)beginObservingGuestSideBar {
+    if(self.sideBarToken) return;
+    if(@available(iOS 27.1, *)) {} else return;
+    NSString *name = [NSString stringWithFormat:@"com.kdt.livecontainer.sidebar.%@", self.dataUUID];
+    __weak typeof(self) weakSelf = self;
+    int token = 0;
+    if(notify_register_dispatch(name.UTF8String, &token, dispatch_get_main_queue(), ^(int t) {
+        uint64_t state = 0;
+        notify_get_state(t, &state);
+        [weakSelf guestSideBarChanged:state];
+    }) != NOTIFY_STATUS_OK) return;
+    self.sideBarToken = @(token);
+    // The guest may have answered before anyone was listening.
+    uint64_t state = 0;
+    notify_get_state(token, &state);
+    [self guestSideBarChanged:state];
+}
+
+- (void)guestSideBarChanged:(uint64_t)state {
+    [MultitaskDockManager.shared setGuestSideBar:state forAppUUID:self.dataUUID];
+}
+
+- (void)endObservingGuestSideBar {
+    if(!self.sideBarToken) return;
+    notify_cancel(self.sideBarToken.intValue);
+    self.sideBarToken = nil;
+    [MultitaskDockManager.shared setGuestSideBar:0 forAppUUID:self.dataUUID];
 }
 
 - (void)endObservingGuestPiPRequests {

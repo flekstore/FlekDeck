@@ -1351,10 +1351,12 @@ struct FlekInstallerView: View {
             // Matches the dock's own rule: the bar only leaves the bottom when the
             // height is short. On iPad, and on the unfolded iPhone Duo, it stays
             // along the bottom in both orientations, so bottom content must keep
-            // making room for it.
-            barIsLandscape = scene.interfaceOrientation.isLandscape
+            // making room for it — unless it stands in the side column beside the
+            // Duo's status bar, where it takes no room from the bottom either.
+            barIsLandscape = (scene.interfaceOrientation.isLandscape
                 && scene.traitCollection.userInterfaceIdiom != .pad
-                && scene.traitCollection.verticalSizeClass == .compact
+                && scene.traitCollection.verticalSizeClass == .compact)
+                || Self.barStandsInSideColumn(in: scene)
         }
         if #available(iOS 16.0, *) {
             let mgr = MultitaskDockManager.shared
@@ -1363,6 +1365,13 @@ struct FlekInstallerView: View {
             guard mgr.isVisible else { return }
             switcherBarVisible = mgr.isSwitcherBarVisible
         }
+    }
+
+    /// Whether the bar stands in the side column beside an iPhone Duo's status bar,
+    /// off the bottom. The bar itself is iOS 16 and up.
+    private static func barStandsInSideColumn(in scene: UIWindowScene) -> Bool {
+        guard #available(iOS 16.0, *) else { return false }
+        return MultitaskDockManager.barStandsInSideColumn(for: scene.traitCollection)
     }
 
     /// A readable title for a hand-started install, taken from the file or URL

@@ -22,6 +22,7 @@ void LCHostIdentityInit(void);
 void LCAudioMuteInit(NSString* dataUUID);
 void LCGuestPiPInit(NSString* dataUUID);
 void LCGuestCaptureInit(NSString* dataUUID);
+void LCGuestSideBarInit(NSString* dataUUID);
 
 @interface NSBundle(LiveContainer)
 - (instancetype)initWithPathForMainBundle:(NSString *)path;

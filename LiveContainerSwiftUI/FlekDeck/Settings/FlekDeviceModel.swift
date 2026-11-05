@@ -39,6 +39,43 @@ enum FlekDeviceModel {
     /// the display rather than across the top.
     static var isDuo: Bool { identifier == "iPhone19,4" }
 
+    /// The iPhone Duo's two displays: the cover display it has folded, and the
+    /// inner one it opens up to.
+    enum DuoDisplay {
+        case cover, inner
+    }
+
+    /// Which of the iPhone Duo's displays `screen` is; nil on any other phone.
+    /// Told apart by their size held upright: the cover display is 466 × 678
+    /// points, the inner one 669 × 951.
+    static func duoDisplay(of screen: UIScreen) -> DuoDisplay? {
+        guard isDuo else { return nil }
+        let size = screen.fixedCoordinateSpace.bounds.size
+        func matches(_ width: CGFloat, _ height: CGFloat) -> Bool {
+            abs(size.width - width) < 1 && abs(size.height - height) < 1
+        }
+        if matches(466, 678) { return .cover }
+        if matches(669, 951) { return .inner }
+        return nil
+    }
+
+    /// Quarter-turns `screen` is mounted at against the phone itself, counted the
+    /// way `UIInterfaceOrientation` turns are: a phone held upright with its
+    /// interface the right way up to the user reads as this many turns.
+    ///
+    /// None on any display but the iPhone Duo's inner one, which is mounted on its
+    /// side: held upright and open, its interface is `.landscapeLeft` while the
+    /// phone itself reads as portrait (as FlekTest logs it), and the picture is
+    /// the right way up all the same.
+    static func displayMountingSteps(of screen: UIScreen) -> Int {
+        duoDisplay(of: screen) == .inner ? 1 : 0
+    }
+
+    /// What stands in for the multitask bar while it is down, until a choice is
+    /// made under Multitask Control in Settings: the bottom swipe, except on an
+    /// iPhone Duo, which starts with the floating button.
+    static var usesBottomSwipeByDefault: Bool { !isDuo }
+
     /// From Xcode's own list of devices, with the identifiers it leaves out
     /// for the same devices with other radios or for other markets.
     private static let names: [String: String] = [

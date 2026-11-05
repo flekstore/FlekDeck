@@ -103,10 +103,12 @@ struct FlekScreenshotViewer: View {
         // Same rule as the dock's: when the height is short — an iPhone or the
         // iPhone Duo's cover display in landscape — the bar moves to a side edge,
         // where it takes nothing from the bottom. On iPad, and on the unfolded
-        // Duo, it stays put.
-        let onSideEdge = (scene?.interfaceOrientation.isLandscape ?? false)
+        // Duo, it stays put — unless it stands in the side column beside the Duo's
+        // status bar, which takes nothing from the bottom either.
+        let onSideEdge = ((scene?.interfaceOrientation.isLandscape ?? false)
             && scene?.traitCollection.userInterfaceIdiom != .pad
-            && scene?.traitCollection.verticalSizeClass == .compact
+            && scene?.traitCollection.verticalSizeClass == .compact)
+            || MultitaskDockManager.barStandsInSideColumn(for: scene?.traitCollection)
         guard manager.isVisible, manager.isSwitcherBarVisible, !onSideEdge else {
             barInset = 0
             return

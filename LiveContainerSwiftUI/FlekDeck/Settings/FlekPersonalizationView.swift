@@ -284,6 +284,8 @@ struct FlekPersonalizationView: View {
     private func barPositionOption(_ position: FlekHomeBarPosition, title: String) -> some View {
         optionTile(title: title, selected: homeBarPosition == position.rawValue) {
             homeBarPosition = position.rawValue
+            // The bar over this very page moves with it, into the column or out.
+            NotificationCenter.default.post(name: .multitaskBarPositionChanged, object: nil)
         } glyph: { selected in
             BarPositionGlyph(position: position, selected: selected)
         }

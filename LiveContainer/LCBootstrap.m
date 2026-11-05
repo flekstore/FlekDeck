@@ -847,6 +847,9 @@ static NSString* invokeAppMain(NSString *selectedApp, NSString *selectedContaine
         // Nor can it record — see LCGuestCapture.m. The window says so rather
         // than letting the app fall silent with no explanation.
         LCGuestCaptureInit(dataUUID);
+        // Nor can the window see where an iPhone Duo puts the app's own side bar,
+        // which its buttons stand beside — see LCGuestSideBar.m. The app says.
+        LCGuestSideBarInit(dataUUID);
         // Closing a window signals the guest dead, which is sooner than
         // CFPreferences would have got round to writing its changes out.
         NUDGuestFlushOnTerminationInit();
