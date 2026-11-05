@@ -173,6 +173,11 @@ final class LCInstallQueue: ObservableObject {
     private static let progressInterval: UInt64 = 100_000_000 // 0.1 s
     private var progressFlushPending = false
 
+    /// Sent at every flush, whether or not anything the screen draws has moved.
+    /// For the background task, whose bar the system draws finer than the
+    /// screen's whole percents: see `LCInstallBackgroundTaskManager.progressUnits`.
+    let progressFlushed = PassthroughSubject<Void, Never>()
+
     /// Set by LCAppListView. Called (serially) when an item is ready
     /// for extraction + signing. The file to install is at
     /// `item.downloadedFileURL` (remote) or `URL(string: item.url)` (local).
@@ -334,6 +339,7 @@ final class LCInstallQueue: ObservableObject {
         if moved {
             objectWillChange.send()
         }
+        progressFlushed.send()
     }
 
     private func cleanupItem(_ item: InstallItem) {

@@ -84,9 +84,12 @@ enum LCInstallBackgroundTask {
 private final class LCInstallBackgroundTaskManager {
     static let shared = LCInstallBackgroundTaskManager()
 
-    /// Resolution of the progress bar the system draws: whole percents, the same
-    /// steps the percentage in the text moves in.
-    private static let progressUnits: Int64 = 100
+    /// Resolution of the progress bar the system draws: tenths of a percent,
+    /// finer than the whole percents in the text. On a slow connection a whole
+    /// percent of a large app can take most of a minute to arrive, and a bar
+    /// that sits still that long looks stalled, which the system expires first.
+    /// It still moves at most every `progressInterval`.
+    private static let progressUnits: Int64 = 1000
 
     private struct Entry {
         let identifier: String
@@ -270,7 +273,10 @@ private final class LCInstallBackgroundTaskManager {
         // once, progress as often as it visibly moves — so a single subscription
         // can't miss a transition the way hand-placed calls would. It fires just
         // *before* the change lands, hence reading the state one hop later.
-        queueObserver = LCInstallQueue.shared.objectWillChange.sink { _ in
+        // Progress too small for the screen to show comes through
+        // `progressFlushed`, for the bar's tenths of a percent.
+        let queue = LCInstallQueue.shared
+        queueObserver = queue.objectWillChange.merge(with: queue.progressFlushed).sink { _ in
             DispatchQueue.main.async {
                 LCInstallBackgroundTaskManager.shared.refresh()
             }
