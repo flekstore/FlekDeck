@@ -877,27 +877,30 @@ static UIInterfaceOrientation LCWindowOrientation(UIView *view, UIMutableApplica
         // which way the phone was turned, so the reservation comes off every edge
         // rather than being assumed onto one. Portrait is unchanged by arithmetic:
         // the reservation there is larger than the home-indicator inset it cancels.
-        // The window is held clear of the sensor housing while it is turned (see
-        // -updateMaximizedFrameWithSettings:), so the guest is no longer sitting
-        // under it and must not be told to keep it clear a second time.
         //
-        // Asked of the window's own shape, not of how the device is being held.
-        // The two were the same answer while the window always turned with the
-        // phone, and the top inset was read from the device — a sticky reading,
-        // because the raw one turns face-up on a tilt and would put the inset back
-        // and shift the guest's content for it. Neither is right once the host can
-        // be pinned: an orientation-locked guest keeps a landscape window while the
-        // phone is turned upright, and the device reading then restored the top
-        // inset and laid a strip of the black backdrop across the top of a guest
-        // that had not moved. It fails the other way too — a portrait window under
-        // a sideways phone had its housing clearance taken away and drew under the
-        // island. The window's shape cannot be wrong about the window, and it is
-        // already what the long edges below are asked of, two lines apart.
+        // The sides are handed on as the window has them. A turned window runs under
+        // the sensor housing as a real app does (see -updateMaximizedFrameWithSettings:),
+        // and the guest keeps its content clear of the island through the inset iOS
+        // gives any app turned on its side: the island's clearance on both long
+        // edges. An iPhone Duo's status bar comes through the same way — its strip is
+        // the window's inset on that side, and the guest keeps out of it as it would
+        // anywhere.
+        //
+        // The top is dropped in a wide window, which is asked of the window's own
+        // shape, not of how the device is being held. The two were the same answer
+        // while the window always turned with the phone, and the top inset was read
+        // from the device — a sticky reading, because the raw one turns face-up on a
+        // tilt and would put the inset back and shift the guest's content for it.
+        // Neither is right once the host can be pinned: an orientation-locked guest
+        // keeps a landscape window while the phone is turned upright, and the device
+        // reading then restored the top inset and laid a strip of the black backdrop
+        // across the top of a guest that had not moved. It fails the other way too —
+        // a portrait window under a sideways phone had its housing clearance taken
+        // away and drew under the island. The window's shape cannot be wrong about
+        // the window.
         CGSize windowSize = self.view.window.bounds.size;
         if(windowSize.width > windowSize.height) {
             safeAreaInsets.top = 0;
-            safeAreaInsets.left = 0;
-            safeAreaInsets.right = 0;
         }
         UIEdgeInsets barInsets = MultitaskDockManager.shared.barReservedInsets;
         safeAreaInsets.top    = MAX(safeAreaInsets.top    - barInsets.top,    0);
@@ -1004,30 +1007,14 @@ static UIInterfaceOrientation LCWindowOrientation(UIView *view, UIMutableApplica
     UIEdgeInsets barInsets = MultitaskDockManager.shared.barReservedInsets;
     maxFrame = UIEdgeInsetsInsetRect(maxFrame, barInsets);
 
-    // Held off the sensor housing, but only on the side it is really on.
-    //
-    // Upright the housing is above the window and nothing here has to care. Turned,
-    // it runs along one of the two long edges, and the window is otherwise laid out
-    // straight across it — so the guest draws underneath and the app's own content
-    // is what sits behind the island.
-    //
-    // Which edge cannot be read from the insets: iOS reports the same clearance on
-    // both sides of a turned window, so they say how much and never which. The
-    // orientation says which. In the other direction the housing shares its edge
-    // with the bar, whose strip is already reserved and already covers it, so
-    // nothing is held back there — a second reservation would only be a margin the
-    // app is pushed in by for no reason.
-    CGSize windowSize = self.view.window.bounds.size;
-    if(windowSize.width > windowSize.height) {
-        UIInterfaceOrientation windowOrientation = LCWindowOrientation(self.view, settings);
-        if(windowOrientation == UIInterfaceOrientationLandscapeRight && barInsets.left <= 0) {
-            CGFloat housing = self.view.window.safeAreaInsets.left;
-            maxFrame = UIEdgeInsetsInsetRect(maxFrame, UIEdgeInsetsMake(0, housing, 0, 0));
-        }
-    }
-
-
-
+    // Not held off the sensor housing when turned. A real app turned on its side
+    // runs under the island and keeps its own controls clear of it through its
+    // safe area, which the guest is handed as the window has it (see
+    // -updateMaximizedSafeAreaWithSettings:). A window cut short beside the island
+    // was narrower than the app expected by the island's clearance, and an app
+    // that keeps the same margin on both sides of its window, as YouTube's player
+    // does, kept that clearance a second time inside it: the controls on the
+    // island's side stood twice as far in, and the picture sat off centre.
     [self setWindowFrame:maxFrame];
 }
 

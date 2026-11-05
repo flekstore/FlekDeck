@@ -23,8 +23,7 @@ static void *kBackdropObservationContext = &kBackdropObservationContext;
 }
 /// Opaque black filler, laid directly under the window in front. Guest windows
 /// don't always cover the screen — a landscape-only app on a portrait device is
-/// laid out as a scaled landscape strip, a maximized one turned with the sensor
-/// housing on the left is held clear of it, and even a maximized one leaves
+/// laid out as a scaled landscape strip, and even a maximized one leaves
 /// slivers outside its rounded corners. Without this, what shows in those gaps
 /// is whatever is behind the window: the launcher behind the host view, which is
 /// white in light mode, or another window. Hidden whenever no app window is
@@ -33,8 +32,7 @@ static void *kBackdropObservationContext = &kBackdropObservationContext;
 /// Under the window in front rather than under them all. Switching apps leaves
 /// the one switched from visible behind the new one, and from the back the
 /// backdrop covered the launcher only, so that window showed through every gap
-/// of the one in front: beside a turned guest, a strip of the app or FlekDeck
-/// page before it where the housing is.
+/// of the one in front: the app or FlekDeck page before it.
 @property(nonatomic) UIView *backdropView;
 @end
 

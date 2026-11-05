@@ -7465,9 +7465,8 @@ extension MultitaskDockManager {
             springboard.view.removeFromSuperview()
             // In the same moment as the backdrop, which then lies over them. Faded
             // back in while it was still held off, they showed in every gap the
-            // window in front leaves for the length of the fade: beside a turned
-            // app, a strip of the one swiped away from where the housing is. Not
-            // one closed or minimized meanwhile, which stays the way that left it.
+            // window in front leaves for the length of the fade. Not one closed
+            // or minimized meanwhile, which stays the way that left it.
             for (view, alpha) in springboard.fadedWindows where view.superview != nil && !view.isHidden {
                 view.alpha = alpha
             }
