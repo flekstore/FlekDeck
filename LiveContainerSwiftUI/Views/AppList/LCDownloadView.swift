@@ -85,6 +85,12 @@ class DownloadDelegate: NSObject, URLSessionDownloadDelegate {
     let progressCallback: (Float, Int64, Int64) -> Void
     let completeCallback: (URL?, Error?) -> Void
 
+    /// URLSession reports every chunk it writes, a few hundred times a second on
+    /// a fast connection, and each report costs the main thread several hops.
+    /// Nothing that shows the progress needs it more often than this.
+    private static let reportInterval: TimeInterval = 0.1
+    private var lastReport: TimeInterval = 0
+
     init(progressCallback: @escaping (Float, Int64, Int64) -> Void,
          completeCallback: @escaping (URL?, Error?) -> Void) {
         self.progressCallback = progressCallback
@@ -92,6 +98,10 @@ class DownloadDelegate: NSObject, URLSessionDownloadDelegate {
     }
 
     func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didWriteData bytesWritten: Int64, totalBytesWritten: Int64, totalBytesExpectedToWrite: Int64) {
+        let now = ProcessInfo.processInfo.systemUptime
+        let finished = totalBytesExpectedToWrite > 0 && totalBytesWritten >= totalBytesExpectedToWrite
+        guard finished || now - lastReport >= Self.reportInterval else { return }
+        lastReport = now
         // -1 (NSURLSessionTransferSizeUnknown) when the server sends no length;
         // dividing by it made progress negative.
         let progress = totalBytesExpectedToWrite > 0 ? Float(totalBytesWritten) / Float(totalBytesExpectedToWrite) : 0

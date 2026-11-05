@@ -2286,7 +2286,18 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             throw error
         }
         if let replacedBundleBackup {
-            try? fm.removeItem(at: replacedBundleBackup)
+            // Out of the Applications folder in one rename, then deleted on a
+            // queue of its own: a bundle runs to thousands of files, and removing
+            // them here held the main thread as the install finished. rename(2)
+            // rather than a move, which across volumes would copy the whole app.
+            let discarded = fm.temporaryDirectory.appendingPathComponent("lc_replaced_\(UUID().uuidString)")
+            if rename(replacedBundleBackup.path, discarded.path) == 0 {
+                DispatchQueue.global(qos: .utility).async {
+                    try? FileManager().removeItem(at: discarded)
+                }
+            } else {
+                try? fm.removeItem(at: replacedBundleBackup)
+            }
         }
         let finalNewApp = LCAppInfo(bundlePath: outputFolder.path)
         finalNewApp?.relativeBundlePath = appRelativePath
@@ -2298,20 +2309,21 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         }
         
         // patch and sign it
-        var signError : String? = nil
-        var signSuccess = false
-        await withUnsafeContinuation({ c in
-            if appToReplace?.uiDontSign ?? false || LCUtils.appGroupUserDefault.bool(forKey: "LCDontSignApp") {
-                finalNewApp.dontSign = true
+        if appToReplace?.uiDontSign ?? false || LCUtils.appGroupUserDefault.bool(forKey: "LCDontSignApp") {
+            finalNewApp.dontSign = true
+        }
+        // On a queue of its own: before the signer takes over, patching goes
+        // through every file of the bundle twice, opening each one, which for a
+        // large app held the main thread, and the screen with it, for seconds.
+        let (signSuccess, signError) = await withUnsafeContinuation { (c: UnsafeContinuation<(Bool, String?), Never>) in
+            DispatchQueue.global(qos: .userInitiated).async {
+                finalNewApp.patchExecAndSignIfNeed(completionHandler: { success, error in
+                    c.resume(returning: (success, error))
+                }, progressHandler: { signProgress in
+                    installProgress.addChild(signProgress!, withPendingUnitCount: 20)
+                }, forceSign: false)
             }
-            finalNewApp.patchExecAndSignIfNeed(completionHandler: { success, error in
-                signError = error
-                signSuccess = success
-                c.resume()
-            }, progressHandler: { signProgress in
-                installProgress.addChild(signProgress!, withPendingUnitCount: 20)
-            }, forceSign: false)
-        })
+        }
         
         // we leave it unsigned even if signing failed
         if let signError {

@@ -3,8 +3,11 @@
 #include "archive.h"
 #include "archive_entry.h"
 
+// libarchive hands data back a block at a time, tens of kilobytes each, and every
+// change to the progress is observed and passed on to the main thread. So the
+// bytes are counted in `unreported` and reported once they reach `step`.
 static int
-copy_data(struct archive *ar, struct archive *aw, NSProgress *progress)
+copy_data(struct archive *ar, struct archive *aw, NSProgress *progress, int64_t step, int64_t *unreported)
 {
   int r;
   const void *buff;
@@ -22,7 +25,11 @@ copy_data(struct archive *ar, struct archive *aw, NSProgress *progress)
       fprintf(stderr, "%s\n", archive_error_string(aw));
       return (r);
     }
-    progress.completedUnitCount += size;
+    *unreported += size;
+    if (*unreported >= step) {
+      progress.completedUnitCount += *unreported;
+      *unreported = 0;
+    }
   }
 }
 
@@ -48,6 +55,7 @@ int extract(NSString* fileToExtract, NSString* extractionPath, NSProgress* progr
         archive_read_free(a);
         return 1;
     }
+    int64_t totalSize = 0;
     while ((r = archive_read_next_header(a, &entry)) != ARCHIVE_EOF) {
         if (r < ARCHIVE_OK)
             fprintf(stderr, "%s\n", archive_error_string(a));
@@ -56,10 +64,15 @@ int extract(NSString* fileToExtract, NSString* extractionPath, NSProgress* progr
             archive_read_free(a);
             return 1;
         }
-        progress.totalUnitCount += archive_entry_size(entry);
+        totalSize += archive_entry_size(entry);
     }
     archive_read_close(a);
     archive_read_free(a);
+    // Set once rather than per entry, for the same reason copy_data reports in
+    // steps. About 200 of them: finer than any bar draws the extraction.
+    progress.totalUnitCount += totalSize;
+    int64_t step = MAX(totalSize / 200, 1);
+    int64_t unreported = 0;
 
     // Re-open the archive and extract
     a = archive_read_new();
@@ -90,7 +103,7 @@ int extract(NSString* fileToExtract, NSString* extractionPath, NSProgress* progr
         if (r < ARCHIVE_OK)
             fprintf(stderr, "%s\n", archive_error_string(ext));
         else if (archive_entry_size(entry) > 0) {
-            r = copy_data(a, ext, progress);
+            r = copy_data(a, ext, progress, step, &unreported);
             if (r < ARCHIVE_OK)
                 fprintf(stderr, "%s\n", archive_error_string(ext));
             if (r < ARCHIVE_WARN)
@@ -102,6 +115,8 @@ int extract(NSString* fileToExtract, NSString* extractionPath, NSProgress* progr
         if (r < ARCHIVE_WARN)
             break;
     }
+    if (unreported > 0)
+        progress.completedUnitCount += unreported;
     archive_read_close(a);
     archive_read_free(a);
     archive_write_close(ext);

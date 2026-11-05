@@ -52,6 +52,25 @@ final class InstallItem: Identifiable, Equatable {
     /// Install (decompress + sign) progress 0…1
     var installProgress: Double = 0
 
+    /// The progress as the screen shows it: whole percents, and for a download
+    /// whose size the server never gave, tenths of a megabyte. Ticks that agree
+    /// on this look the same everywhere progress is drawn.
+    struct ShownProgress: Equatable {
+        var percent: Int
+        var installPercent: Int
+        var downloadedTenthsOfMB: Int64
+    }
+
+    var shownProgress: ShownProgress {
+        ShownProgress(percent: Int((installState.fraction * 100).rounded()),
+                      installPercent: Int((installProgress * 100).rounded()),
+                      downloadedTenthsOfMB: totalBytes > 0 ? 0 : downloadedBytes / 100_000)
+    }
+
+    /// What the queue last told its observers this item's progress looked like.
+    /// See `LCInstallQueue.progressDidChange`.
+    var publishedProgress: ShownProgress?
+
     // Internal download state
     var downloadHelper: DownloadHelper?
     var downloadedFileURL: URL?
@@ -145,6 +164,15 @@ final class LCInstallQueue: ObservableObject {
     private let maxConcurrentDownloads = 3
     private var isInstalling = false
 
+    /// Progress arrives far faster than it can be seen to move: a download
+    /// reports every 64 KB or so, an extraction every step it takes, and each
+    /// `objectWillChange` redraws every view that watches the queue, the home
+    /// screen and the Installer included. So a tick only records the new
+    /// numbers; observers hear of them at most this often, and only once
+    /// something they draw has changed. Phase changes are still sent at once.
+    private static let progressInterval: UInt64 = 100_000_000 // 0.1 s
+    private var progressFlushPending = false
+
     /// Set by LCAppListView. Called (serially) when an item is ready
     /// for extraction + signing. The file to install is at
     /// `item.downloadedFileURL` (remote) or `URL(string: item.url)` (local).
@@ -213,7 +241,7 @@ final class LCInstallQueue: ObservableObject {
     /// Called by the install handler to report extraction/signing progress.
     func updateInstallProgress(_ item: InstallItem, fraction: Double) {
         item.installProgress = fraction
-        objectWillChange.send()
+        progressDidChange()
     }
 
     /// Called by the install handler when install succeeds.
@@ -283,6 +311,31 @@ final class LCInstallQueue: ObservableObject {
         FlekKeepAwake.set(items.contains { isActive($0) }, for: .installs)
     }
 
+    /// Called on every progress tick. See `progressInterval`.
+    private func progressDidChange() {
+        guard !progressFlushPending else { return }
+        progressFlushPending = true
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: LCInstallQueue.progressInterval)
+            self?.flushProgress()
+        }
+    }
+
+    private func flushProgress() {
+        progressFlushPending = false
+        var moved = false
+        for item in items {
+            let shown = item.shownProgress
+            if shown != item.publishedProgress {
+                item.publishedProgress = shown
+                moved = true
+            }
+        }
+        if moved {
+            objectWillChange.send()
+        }
+    }
+
     private func cleanupItem(_ item: InstallItem) {
         item.progressCancellable = nil
         item.downloadingCancellable = nil
@@ -348,7 +401,7 @@ final class LCInstallQueue: ObservableObject {
                     item.downloadedBytes = helper.downloadedSize
                     item.totalBytes = helper.totalSize
                 }
-                self.objectWillChange.send()
+                self.progressDidChange()
             }
 
         Task { [weak self] in

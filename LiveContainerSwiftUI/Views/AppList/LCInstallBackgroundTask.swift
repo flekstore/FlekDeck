@@ -84,9 +84,9 @@ enum LCInstallBackgroundTask {
 private final class LCInstallBackgroundTaskManager {
     static let shared = LCInstallBackgroundTaskManager()
 
-    /// Resolution of the progress bar the system draws. The queue reports a
-    /// fraction, so pick something finer than a percent.
-    private static let progressUnits: Int64 = 1000
+    /// Resolution of the progress bar the system draws: whole percents, the same
+    /// steps the percentage in the text moves in.
+    private static let progressUnits: Int64 = 100
 
     private struct Entry {
         let identifier: String
@@ -97,12 +97,17 @@ private final class LCInstallBackgroundTaskManager {
         var subtitle: String?
         var phase: InstallPhase?
         var textUpdatedAt: Date?
+        var progressUpdatedAt: Date?
     }
 
     /// The least time between two text changes within one phase. The percentage
     /// moves every whole percent; the row doesn't need to redraw faster than this
     /// to read as live, and every update is a round trip to the system.
     private static let textInterval: TimeInterval = 1
+
+    /// The same for the bar. The task passes every change of its progress on to
+    /// the system, which redraws its card for each one.
+    private static let progressInterval: TimeInterval = 0.5
 
     /// How long a finished row stays up showing "Installed" before it goes, so
     /// the install ends on a visible success instead of the row just vanishing.
@@ -261,10 +266,10 @@ private final class LCInstallBackgroundTaskManager {
 
     private func startObservingQueue() {
         guard queueObserver == nil else { return }
-        // Every queue mutation funnels through objectWillChange — progress ticks and
-        // phase changes alike — so a single subscription can't miss a transition the
-        // way hand-placed calls would. It fires just *before* the change lands,
-        // hence reading the state one hop later.
+        // Every queue mutation funnels through objectWillChange — phase changes at
+        // once, progress as often as it visibly moves — so a single subscription
+        // can't miss a transition the way hand-placed calls would. It fires just
+        // *before* the change lands, hence reading the state one hop later.
         queueObserver = LCInstallQueue.shared.objectWillChange.sink { _ in
             DispatchQueue.main.async {
                 LCInstallBackgroundTaskManager.shared.refresh()
@@ -294,26 +299,36 @@ private final class LCInstallBackgroundTaskManager {
 
     private func update(_ item: InstallItem) {
         guard let entry = entries[item.id], let task = entry.task else { return }
+        // A new phase shows at once; within one, the bar keeps to progressInterval
+        // and the text to textInterval.
+        let now = Date()
+        let newPhase = item.phase != entry.phase
+
         // Accurate progress isn't cosmetic: the system expires tasks that look
         // stalled before it expires ones that are visibly moving. The bar and the
         // percentage in the text come from the same number, so they always agree.
         let fraction = Self.fraction(for: item)
-        task.progress.completedUnitCount = Int64((fraction * Double(Self.progressUnits)).rounded())
+        let units = Int64((fraction * Double(Self.progressUnits)).rounded())
+        if units != task.progress.completedUnitCount,
+           newPhase || Self.hasElapsed(Self.progressInterval, since: entry.progressUpdatedAt, now: now) {
+            task.progress.completedUnitCount = units
+            entries[item.id]?.progressUpdatedAt = now
+        }
 
+        guard newPhase || Self.hasElapsed(Self.textInterval, since: entry.textUpdatedAt, now: now) else { return }
+        entries[item.id]?.phase = item.phase
         let title = Self.title(for: item)
         let subtitle = Self.subtitle(for: item, fraction: fraction)
         guard title != entry.title || subtitle != entry.subtitle else { return }
-        // A new phase shows at once; within one, the text keeps to textInterval.
-        let now = Date()
-        if item.phase == entry.phase, let last = entry.textUpdatedAt,
-           now.timeIntervalSince(last) < Self.textInterval {
-            return
-        }
         entries[item.id]?.title = title
         entries[item.id]?.subtitle = subtitle
-        entries[item.id]?.phase = item.phase
         entries[item.id]?.textUpdatedAt = now
         task.updateTitle(title, subtitle: subtitle)
+    }
+
+    private static func hasElapsed(_ interval: TimeInterval, since last: Date?, now: Date) -> Bool {
+        guard let last else { return true }
+        return now.timeIntervalSince(last) >= interval
     }
 
     private static func fraction(for item: InstallItem) -> Double {
