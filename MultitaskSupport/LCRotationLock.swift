@@ -32,7 +32,7 @@ import UIKit
     /// the geometry paths sampled a value that still said landscape when the phone
     /// was already flat, so the lock never engaged. Whatever the mechanism inside
     /// UIKit, the fix is not to depend on it — `beginTracking()` keeps the reading
-    /// warm for the life of the process.
+    /// warm whenever anything can depend on it: see `updatePolling()`.
     @objc public static var isFlat: Bool {
         !cachedOrientation.isValidInterfaceOrientation
     }
@@ -41,6 +41,18 @@ import UIKit
 
     private static var cachedOrientation: UIDeviceOrientation = .unknown
     private static var tracker: Tracker?
+
+    /// Whether a guest app is open in a window, minimized ones included. Only
+    /// the geometry of guests in windows asks the lock, so with none open the
+    /// poll has nothing to keep warm. Kept up to date by the dock.
+    @objc public static var hasGuestWindows = false {
+        didSet {
+            guard oldValue != hasGuestWindows else { return }
+            updatePolling()
+        }
+    }
+
+    private static var isInForeground = true
 
     /// Starts refreshing the device reading and keeps it refreshed. Idempotent.
     @objc public static func beginTracking() {
@@ -58,15 +70,29 @@ import UIKit
     private static func startTracking() {
         guard tracker == nil else { return }
         UIDevice.current.beginGeneratingDeviceOrientationNotifications()
+        isInForeground = UIApplication.shared.applicationState != .background
         tracker = Tracker()
         sample()
+        updatePolling()
     }
 
     fileprivate static func sample() {
         cachedOrientation = UIDevice.current.orientation
     }
 
-    /// Owns the timer and the notification observer, both of which need a target.
+    /// Polls only while something can depend on the reading: a guest in a
+    /// window, or the panel showing it, with FlekDeck in the foreground. Each
+    /// poll wakes the processor, ten times a second for the lock and ten for the
+    /// overlay's readout, and both used to run for as long as FlekDeck did,
+    /// background included. Meanwhile the orientation notification keeps the
+    /// reading current, and polling starts with a fresh sample.
+    fileprivate static func updatePolling() {
+        let polling = isInForeground && (hasGuestWindows || LCRotationLockOverlay.isPanelVisible)
+        tracker?.setPolling(polling)
+        LCRotationLockOverlay.shared.setPolling(polling)
+    }
+
+    /// Owns the timer and the notification observers, all of which need a target.
     private final class Tracker: NSObject {
         private var timer: Timer?
 
@@ -79,6 +105,21 @@ import UIKit
             NotificationCenter.default.addObserver(
                 self, selector: #selector(orientationChanged),
                 name: UIDevice.orientationDidChangeNotification, object: nil)
+            NotificationCenter.default.addObserver(
+                self, selector: #selector(didEnterBackground),
+                name: UIApplication.didEnterBackgroundNotification, object: nil)
+            NotificationCenter.default.addObserver(
+                self, selector: #selector(willEnterForeground),
+                name: UIApplication.willEnterForegroundNotification, object: nil)
+        }
+
+        func setPolling(_ polling: Bool) {
+            guard polling != (timer != nil) else { return }
+            guard polling else {
+                timer?.invalidate()
+                timer = nil
+                return
+            }
             // Built unscheduled and added to the main run loop explicitly, never
             // with `Timer.scheduledTimer`.
             //
@@ -100,9 +141,20 @@ import UIKit
             }
             RunLoop.main.add(t, forMode: .common)
             timer = t
+            LCRotationLock.sample()
         }
 
         @objc private func orientationChanged() { LCRotationLock.sample() }
+
+        @objc private func didEnterBackground() {
+            LCRotationLock.isInForeground = false
+            LCRotationLock.updatePolling()
+        }
+
+        @objc private func willEnterForeground() {
+            LCRotationLock.isInForeground = true
+            LCRotationLock.updatePolling()
+        }
     }
 
     /// Forced on from the panel. Survives the phone being picked up.
@@ -169,7 +221,9 @@ import UIKit
 
     /// Whether the panel is drawn. Everything else about the overlay happens
     /// either way: the window is created, attached to the scene, laid out and
-    /// composited, and its timer runs. Only the panel's contents are hidden.
+    /// composited, and its timer runs whenever the lock polls. Only the panel's
+    /// contents are hidden. A panel on screen keeps both polling with no guest
+    /// open, so that what it shows is live.
     ///
     /// A workaround, and labelled as one. Ruled out by experiment: the lock's own
     /// value (identical either way, and the overlay never writes it); the panel
@@ -180,7 +234,12 @@ import UIKit
     ///
     /// What remains untested is which of the window's ongoing effects matters.
     /// Bisecting `start()` would answer it.
-    @objc public static var isPanelVisible: Bool = false
+    @objc public static var isPanelVisible: Bool = false {
+        didSet {
+            guard oldValue != isPanelVisible else { return }
+            LCRotationLock.updatePolling()
+        }
+    }
 
     /// Shows or hides the panel on an overlay that is already running.
     ///
@@ -270,10 +329,32 @@ import UIKit
         label = text
         button = toggle
 
+        if wantsPolling {
+            startTimer()
+        }
+        refresh()
+    }
+
+    /// Whether the lock is polling, and the readout's timer with it. Kept from
+    /// before `start()`, which only then has a readout to refresh.
+    private var wantsPolling = false
+
+    fileprivate func setPolling(_ polling: Bool) {
+        wantsPolling = polling
+        guard window != nil, polling != (timer != nil) else { return }
+        if polling {
+            startTimer()
+            refresh()
+        } else {
+            timer?.invalidate()
+            timer = nil
+        }
+    }
+
+    private func startTimer() {
         timer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
             self?.refresh()
         }
-        refresh()
     }
 
     @objc public func stop() {

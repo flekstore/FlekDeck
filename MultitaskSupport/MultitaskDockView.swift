@@ -184,7 +184,10 @@ class AppInfoProvider {
 @objc public class MultitaskDockManager: NSObject, ObservableObject {
     @objc public static let shared = MultitaskDockManager()
     
-    @Published var apps: [DockAppModel] = []
+    @Published var apps: [DockAppModel] = [] {
+        // The rotation lock polls the device only while a guest has a window.
+        didSet { LCRotationLock.hasGuestWindows = apps.contains { !$0.isInternalPage } }
+    }
     @Published var isVisible: Bool = false
     @Published var isSwitcherBarVisible: Bool = true
     /// Both drive `updatePiPArming()`: between them they decide which window, if
