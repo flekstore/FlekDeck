@@ -30,6 +30,7 @@ struct FlekPersonalizationView: View {
     @AppStorage("dynamicColors", store: LCUtils.appGroupUserDefault) private var dynamicColors = true
     @AppStorage("darkModeIcon", store: LCUtils.appGroupUserDefault) private var darkModeIcon = false
     @AppStorage("LCFrameShortcutIcons", store: LCUtils.appGroupUserDefault) private var frameShortIcon = false
+    @AppStorage(FlekDeckKeys.glassStyle, store: LCUtils.appGroupUserDefault) private var glassStyle: FlekGlassStyle = .liquid
 
     @State private var showCollection = false
     @State private var showPhotoPicker = false
@@ -102,6 +103,27 @@ struct FlekPersonalizationView: View {
                             .padding(.horizontal, 16).padding(.vertical, 12)
                     }
                     .background(card)
+                }
+
+                // MARK: Glass
+                // Only where there is Liquid Glass to choose: before iOS 26 the
+                // same surfaces are frosted already.
+                if #available(iOS 26.0, *) {
+                    VStack(alignment: .leading, spacing: 10) {
+                        sectionHeader("lc.flek.glass".loc)
+
+                        HStack(spacing: 8) {
+                            glassOption(.liquid, title: "lc.flek.glassLiquid".loc)
+                            glassOption(.frosted, title: "lc.flek.glassFrosted".loc)
+                        }
+                        .padding(16)
+                        .background(card)
+
+                        Text("lc.flek.glass.footer".loc)
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                            .padding(.horizontal, 16)
+                    }
                 }
 
                 // MARK: iOS Beta
@@ -267,6 +289,14 @@ struct FlekPersonalizationView: View {
         }
     }
 
+    private func glassOption(_ style: FlekGlassStyle, title: String) -> some View {
+        optionTile(title: title, selected: glassStyle == style) {
+            glassStyle = style
+        } glyph: { selected in
+            GlassGlyph(style: style, selected: selected)
+        }
+    }
+
     /// One of a pair of choices side by side: a picture of the phone with its name
     /// under it, the name filled in blue on the one chosen.
     private func optionTile<Glyph: View>(title: String, selected: Bool,
@@ -366,6 +396,26 @@ private struct BarPositionGlyph: View {
     private var grid: some View {
         Image(systemName: "square.grid.3x3.fill")
             .font(.system(size: 16))
+    }
+}
+
+/// The same phone, with a drop for Liquid Glass and a snowflake for frosted.
+private struct GlassGlyph: View {
+    let style: FlekGlassStyle
+    let selected: Bool
+
+    var body: some View {
+        let tint = selected ? Color.accentColor : Color.secondary
+        ZStack {
+            Image(systemName: FlekSymbol.device)
+                .font(.system(size: 80, weight: .thin))
+                .foregroundStyle(tint)
+
+            Image(systemName: style == .liquid ? "drop.fill" : "snowflake")
+                .font(.system(size: 24))
+                .foregroundStyle(tint)
+                .offset(y: -2)
+        }
     }
 }
 

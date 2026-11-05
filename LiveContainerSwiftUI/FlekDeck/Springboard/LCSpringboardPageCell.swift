@@ -24,6 +24,13 @@ final class LCSpringboardPageCell: UICollectionViewCell {
     var items: [FlekHomeItem] = []
     var draggedItemId: String?
     var darkModeIcon: Bool = false
+    /// Whether the cards are Liquid Glass, or frosted: see `FlekGlassStyle`.
+    var drawsGlass = true {
+        didSet {
+            guard drawsGlass != oldValue else { return }
+            placeCollectionView()
+        }
+    }
     private(set) var isEditing = false
     private var isContextMenuActive = false
     private var pendingReloadItems: [FlekHomeItem]?
@@ -279,6 +286,7 @@ final class LCSpringboardPageCell: UICollectionViewCell {
     /// as a group rather than one effect at a time, which is what Apple has
     /// for many glass elements side by side. Spacing 0, so that cards merge
     /// only where they actually touch, which they never do on the grid.
+    /// Taken out while the cards are frosted, when it has nothing to gather.
     private let glassContainer: UIVisualEffectView? = {
         guard #available(iOS 26, *) else { return nil }
         let effect = UIGlassContainerEffect()
@@ -295,18 +303,25 @@ final class LCSpringboardPageCell: UICollectionViewCell {
         clipsToBounds = false
         contentView.clipsToBounds = false
 
-        if let glassContainer {
-            contentView.addSubview(glassContainer)
-            glassContainer.contentView.addSubview(collectionView)
-        } else {
-            contentView.addSubview(collectionView)
-        }
+        placeCollectionView()
         collectionView.dataSource = self
         collectionView.delegate = self
     }
 
     required init?(coder: NSCoder) {
         fatalError("init(coder:) has not been implemented")
+    }
+
+    /// The grid goes in the glass container while the cards are glass, and
+    /// straight in the cell otherwise.
+    private func placeCollectionView() {
+        if let glassContainer, drawsGlass {
+            contentView.addSubview(glassContainer)
+            glassContainer.contentView.addSubview(collectionView)
+        } else {
+            contentView.addSubview(collectionView)
+            glassContainer?.removeFromSuperview()
+        }
     }
 
     override func layoutSubviews() {
@@ -350,7 +365,7 @@ final class LCSpringboardPageCell: UICollectionViewCell {
             guard let iconCell = cell as? LCSpringboardIconCell,
                   let idx = collectionView.indexPath(for: iconCell)?.item,
                   idx < items.count else { continue }
-            iconCell.configure(with: items[idx], darkMode: darkModeIcon, cardWidth: cardWidth)
+            iconCell.configure(with: items[idx], darkMode: darkModeIcon, glass: drawsGlass, cardWidth: cardWidth)
         }
     }
 
@@ -453,7 +468,7 @@ extension LCSpringboardPageCell: UICollectionViewDataSource {
         let cell = collectionView.dequeueReusableCell(withReuseIdentifier: "IconCell", for: indexPath) as! LCSpringboardIconCell
         let item = items[indexPath.item]
 
-        cell.configure(with: item, darkMode: darkModeIcon, cardWidth: cardWidth)
+        cell.configure(with: item, darkMode: darkModeIcon, glass: drawsGlass, cardWidth: cardWidth)
 
         // Edit mode state
         if isEditing && !cell.isPlaceholderCell {

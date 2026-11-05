@@ -18,6 +18,7 @@ enum FlekDeckKeys {
     static let homeScreenOrder = "FlekHomeScreenOrder" // ordered IDs of all home screen items (default apps + installed)
     static let homeScreenPageSizes = "FlekHomeScreenPageSizes" // per-page item counts for custom page layouts
     static let cardStyleGlass = "FlekCardStyleGlass" // true = liquid glass, false = thin material
+    static let glassStyle = "FlekGlassStyle"         // "liquid" | "frosted"
 }
 
 /// Home screen layout chosen on the Personalization page.
@@ -33,6 +34,14 @@ enum FlekHomeLayout: String {
 enum FlekHomeBarPosition: String {
     case bottom
     case side
+}
+
+/// How FlekDeck draws its own glass, chosen on the Personalization page: Liquid
+/// Glass, or frosted — the simpler blur the same surfaces have before iOS 26.
+/// Offered from iOS 26 on; before it, everything is frosted either way.
+enum FlekGlassStyle: String {
+    case liquid
+    case frosted
 }
 
 /// The three built-in "apps" pinned at the start of the home screen.

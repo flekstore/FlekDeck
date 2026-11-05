@@ -16813,6 +16813,50 @@
         }
       }
     },
+    "lc.flek.glass" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Glass"
+          }
+        }
+      }
+    },
+    "lc.flek.glass.footer" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Frosted is less demanding than Liquid Glass and can improve performance."
+          }
+        }
+      }
+    },
+    "lc.flek.glassFrosted" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Frosted"
+          }
+        }
+      }
+    },
+    "lc.flek.glassLiquid" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Liquid"
+          }
+        }
+      }
+    },
     "lc.flek.haptics.light" : {
       "extractionState" : "manual",
       "localizations" : {

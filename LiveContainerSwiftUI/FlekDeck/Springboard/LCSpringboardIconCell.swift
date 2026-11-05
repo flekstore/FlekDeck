@@ -192,8 +192,11 @@ final class LCSpringboardIconCell: UICollectionViewCell {
     /// Used by the drag manager to read back cell order after moves.
     private(set) var configuredItem: FlekHomeItem?
 
-    /// Liquid Glass (iOS 26+) or thin material card background.
+    /// Liquid Glass (iOS 26+) or thin material card background. Made on the first
+    /// `configure`, and again when the glass style changes.
     private var glassBackgroundView: UIVisualEffectView?
+    /// Whether the card is Liquid Glass rather than blur.
+    private var cardIsGlass = false
 
     // MARK: - Layout constants
 
@@ -272,8 +275,6 @@ final class LCSpringboardIconCell: UICollectionViewCell {
         clipsToBounds = false
         contentView.clipsToBounds = false
 
-        setupGlassBackground()
-
         contentView.addSubview(iconImageView)
         contentView.addSubview(nameLabel)
         contentView.addSubview(singleBadge)
@@ -299,19 +300,27 @@ final class LCSpringboardIconCell: UICollectionViewCell {
         contentView.addGestureRecognizer(tap)
     }
 
-    private func setupGlassBackground() {
+    /// Puts the card behind the icon in place of the one there, if any.
+    private func setGlassBackground(glass: Bool) {
+        let effectView = Self.makeCardBackground(glass: glass, traits: traitCollection)
+        if let old = glassBackgroundView {
+            effectView.frame = old.frame
+            effectView.isHidden = old.isHidden
+            old.removeFromSuperview()
+        }
+        contentView.insertSubview(effectView, at: 0)
+        glassBackgroundView = effectView
+        cardIsGlass = glass
+    }
+
+    /// A card: Liquid Glass, or — before iOS 26, and when frosted — a thin
+    /// material with a tint overlay for the frosted look.
+    private static func makeCardBackground(glass: Bool, traits: UITraitCollection) -> UIVisualEffectView {
         let effectView: UIVisualEffectView
-        if #available(iOS 26, *) {
+        if #available(iOS 26, *), glass {
             effectView = UIVisualEffectView(effect: UIGlassEffect(style: .regular))
         } else {
             effectView = UIVisualEffectView(effect: UIBlurEffect(style: .systemUltraThinMaterial))
-        }
-        effectView.layer.cornerRadius = Self.cardCorner
-        effectView.layer.cornerCurve = .continuous
-        effectView.clipsToBounds = true
-
-        // On pre-iOS 26, add a tint overlay for the frosted look
-        if #unavailable(iOS 26) {
             let tint = UIView()
             tint.backgroundColor = UIColor.label.withAlphaComponent(0.15)
             tint.autoresizingMask = [.flexibleWidth, .flexibleHeight]
@@ -319,12 +328,17 @@ final class LCSpringboardIconCell: UICollectionViewCell {
 
             // Subtle border
             effectView.layer.borderWidth = 0.5
-            effectView.layer.borderColor = UIColor.label.withAlphaComponent(0.15).cgColor
+            effectView.layer.borderColor = cardRimColor.resolvedColor(with: traits).cgColor
         }
-
-        contentView.insertSubview(effectView, at: 0)
-        glassBackgroundView = effectView
+        effectView.layer.cornerRadius = Self.cardCorner
+        effectView.layer.cornerCurve = .continuous
+        effectView.clipsToBounds = true
+        return effectView
     }
+
+    /// The blur card's border. A layer's border is a fixed colour rather than
+    /// one that follows the appearance, so it is resolved again when that changes.
+    private static let cardRimColor = UIColor.label.withAlphaComponent(0.15)
 
     override func layoutSubviews() {
         super.layoutSubviews()
@@ -456,6 +470,9 @@ final class LCSpringboardIconCell: UICollectionViewCell {
         if traitCollection.hasDifferentColorAppearance(comparedTo: previousTraitCollection) {
             updateDeleteButtonColors()
             if currentNameIsShared { setName(currentName, shared: true) }
+            if !cardIsGlass {
+                glassBackgroundView?.layer.borderColor = Self.cardRimColor.resolvedColor(with: traitCollection).cgColor
+            }
         }
     }
 
@@ -550,11 +567,15 @@ final class LCSpringboardIconCell: UICollectionViewCell {
     private var currentName: String?
     private var currentNameIsShared = false
 
+    /// - Parameter glass: whether the card is Liquid Glass, or frosted.
     /// - Parameter cardWidth: the width the page lays this card out at — see
     ///   `cardWidth`.
-    func configure(with item: FlekHomeItem, darkMode: Bool, cardWidth: CGFloat) {
+    func configure(with item: FlekHomeItem, darkMode: Bool, glass: Bool, cardWidth: CGFloat) {
         configuredItem = item
         if cardWidth > 0 { self.cardWidth = cardWidth }
+        if glassBackgroundView == nil || glass != cardIsGlass {
+            setGlassBackground(glass: glass)
+        }
         // Only a built-in app carries a count. Worked out for every item, as a
         // cell refreshed in place for another item must not keep the last one's.
         var notificationCount = 0
@@ -872,22 +893,8 @@ final class LCSpringboardIconCell: UICollectionViewCell {
         // 1. Card background — recreate instead of snapshotting
         // (UIVisualEffectView snapshots are unreliable, especially UIGlassEffect)
         if let glass = glassBackgroundView {
-            let bgCopy: UIVisualEffectView
-            if #available(iOS 26, *) {
-                bgCopy = UIVisualEffectView(effect: UIGlassEffect(style: .regular))
-            } else {
-                bgCopy = UIVisualEffectView(effect: UIBlurEffect(style: .systemUltraThinMaterial))
-                let tint = UIView()
-                tint.backgroundColor = UIColor.label.withAlphaComponent(0.15)
-                tint.autoresizingMask = [.flexibleWidth, .flexibleHeight]
-                bgCopy.contentView.addSubview(tint)
-                bgCopy.layer.borderWidth = 0.5
-                bgCopy.layer.borderColor = UIColor.label.withAlphaComponent(0.15).cgColor
-            }
+            let bgCopy = Self.makeCardBackground(glass: cardIsGlass, traits: traitCollection)
             bgCopy.frame = glass.frame
-            bgCopy.layer.cornerRadius = Self.cardCorner
-            bgCopy.layer.cornerCurve = .continuous
-            bgCopy.clipsToBounds = true
             container.addSubview(bgCopy)
         }
 

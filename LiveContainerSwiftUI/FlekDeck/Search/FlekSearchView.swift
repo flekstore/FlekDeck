@@ -915,6 +915,7 @@ private struct FlekStoreSearchRow: View {
 private struct GlassBackground<S: InsettableShape>: ViewModifier {
     let shape: S
     @Environment(\.colorScheme) private var colorScheme
+    @AppStorage(FlekDeckKeys.glassStyle, store: LCUtils.appGroupUserDefault) private var glassStyle: FlekGlassStyle = .liquid
 
     private var isDark: Bool { colorScheme == .dark }
 
@@ -926,7 +927,7 @@ private struct GlassBackground<S: InsettableShape>: ViewModifier {
     }
 
     func body(content: Content) -> some View {
-        if #available(iOS 26, *) {
+        if #available(iOS 26, *), glassStyle == .liquid {
             content
                 .background {
                     StableLiquidGlass(isDark: isDark, tint: glassTint)

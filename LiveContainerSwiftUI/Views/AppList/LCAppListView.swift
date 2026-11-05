@@ -136,6 +136,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
     @AppStorage("darkModeIcon", store: LCUtils.appGroupUserDefault) var darkModeIcon = false
     @AppStorage(FlekDeckKeys.homeLayout, store: LCUtils.appGroupUserDefault) var homeLayout: String = FlekHomeLayout.grid.rawValue
     @AppStorage(FlekDeckKeys.homeBarPosition, store: LCUtils.appGroupUserDefault) var homeBarPosition: String = FlekHomeBarPosition.bottom.rawValue
+    @AppStorage(FlekDeckKeys.glassStyle, store: LCUtils.appGroupUserDefault) var glassStyle: FlekGlassStyle = .liquid
     /// The edge an iPhone Duo's status bar runs down; nil wherever there is none.
     @State private var verticalBarEdge: HorizontalEdge?
 
@@ -220,7 +221,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         // The pill grows out of the search button's side: from the end that
         // faces it, whichever way the bar runs.
         let pillAnchor: UnitPoint = axis == .horizontal ? .trailing : .bottom
-        if #available(iOS 26.0, *) {
+        if #available(iOS 26.0, *), glassStyle == .liquid {
             return AnyView(
                 GlassEffectContainer(spacing: 10) {
                     FlekBarStack(axis: axis, spacing: 10) {
@@ -304,7 +305,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             .foregroundStyle(Color.primary.opacity(0.75))
             .frame(width: FlekTheme.sideBarWidth, height: FlekTheme.sideBarWidth)
 
-        if #available(iOS 26.0, *) {
+        if #available(iOS 26.0, *), glassStyle == .liquid {
             return AnyView(label.glassEffect(.regular.interactive(false), in: .circle))
         }
         return AnyView(
@@ -903,7 +904,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         .padding(.horizontal, 18)
         .frame(height: FlekTheme.bottomBarControlSize)
 
-        if #available(iOS 26.0, *) {
+        if #available(iOS 26.0, *), glassStyle == .liquid {
             return AnyView(label.glassEffect(.regular.interactive(false)))
         }
         return AnyView(
@@ -941,6 +942,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                 LCSpringboardRepresentable(
                     items: $orderedHomeItems,
                     darkModeIcon: darkModeIcon,
+                    drawsGlass: glassStyle == .liquid,
                     isEditing: $isEditing,
                     onTap: { handleHomeTap($0) },
                     onDelete: { item in

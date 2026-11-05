@@ -21,6 +21,7 @@ struct FlekGameWarningView: View {
     let appName: String
     var onChoose: (_ parallel: Bool, _ remember: Bool) -> Void
     @Environment(\.dismiss) private var dismiss
+    @AppStorage(FlekDeckKeys.glassStyle, store: LCUtils.appGroupUserDefault) private var glassStyle: FlekGlassStyle = .liquid
 
     @State private var remember = true
     @State private var sheetHeight: CGFloat = 470
@@ -113,8 +114,8 @@ struct FlekGameWarningView: View {
             // A clear presentation background leaves the sheet with no backdrop of
             // its own, which only reads as intentional under Liquid Glass. Below
             // iOS 26 that renders as bare text over the dimmed springboard, so
-            // those versions get a material instead.
-            if #available(iOS 26.0, *) {
+            // those versions get a material instead, as does the frosted glass style.
+            if #available(iOS 26.0, *), glassStyle == .liquid {
                 v.presentationDetents([.height(sheetHeight)])
                     .presentationDragIndicator(.visible)
                     .presentationBackground(.clear)

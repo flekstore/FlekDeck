@@ -6591,23 +6591,36 @@ private extension View {
     /// Stable Liquid Glass for the multitask bar controls — pins the glass tone
     /// (fixed dark, matching the white icons) so it never re-tints to the app
     /// content behind it, the same approach as the Spotlight search. Falls back
-    /// to a flat translucent fill on older iOS or when Liquid Glass is disabled.
-    @ViewBuilder
+    /// to a flat translucent fill on older iOS, when Liquid Glass is disabled,
+    /// or when the glass style is frosted.
     func stableBarGlass(capsule: Bool) -> some View {
-        if #available(iOS 26.0, *), SharedModel.isLiquidGlassEnabled {
-            background {
+        modifier(StableBarGlass(capsule: capsule))
+    }
+}
+
+/// See `stableBarGlass(capsule:)`. A modifier, so that a change of glass style
+/// reaches bars already on screen.
+@available(iOS 16.0, *)
+private struct StableBarGlass: ViewModifier {
+    let capsule: Bool
+    @AppStorage(FlekDeckKeys.glassStyle, store: LCUtils.appGroupUserDefault) private var glassStyle: FlekGlassStyle = .liquid
+
+    func body(content: Content) -> some View {
+        if #available(iOS 26.0, *), SharedModel.isLiquidGlassEnabled, glassStyle == .liquid {
+            content.background {
                 StableLiquidGlass(isDark: true, tint: UIColor(white: 1.0, alpha: 0.03))
             }
         } else if capsule {
-            background(Capsule().fill(Color.white.opacity(0.15)))
+            content.background(Capsule().fill(Color.white.opacity(0.15)))
         } else {
-            background(Circle().fill(Color.white.opacity(0.15)))
+            content.background(Circle().fill(Color.white.opacity(0.15)))
         }
     }
 }
 
 private struct DockPillBackground: ViewModifier {
     let isCircle: Bool
+    @AppStorage(FlekDeckKeys.glassStyle, store: LCUtils.appGroupUserDefault) private var glassStyle: FlekGlassStyle = .liquid
 
     // Returns AnyView instead of `some View`. With an opaque return type the
     // inferred Body embeds the iOS 26-only type that `glassEffect` produces, and
@@ -6617,7 +6630,7 @@ private struct DockPillBackground: ViewModifier {
     // runtime traps. Erasing pins Body to AnyView, which exists on every version
     // we support; the glass call is then only reached inside the guarded branch.
     func body(content: Content) -> AnyView {
-        if #available(iOS 26.0, *) {
+        if #available(iOS 26.0, *), glassStyle == .liquid {
             if isCircle {
                 return AnyView(content.glassEffect(in: .circle))
             }

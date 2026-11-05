@@ -855,13 +855,14 @@ private struct DetailSurface<S: Shape>: ViewModifier {
     var interactive: Bool = false
 
     @Environment(\.colorScheme) private var colorScheme
+    @AppStorage(FlekDeckKeys.glassStyle, store: LCUtils.appGroupUserDefault) private var glassStyle: FlekGlassStyle = .liquid
 
     // Returns AnyView rather than an opaque type, so the iOS 26-only type
     // `glassEffect` produces stays out of this modifier's static type — the
     // runtime resolves that before the availability check runs, and traps on
     // older systems where the type is absent.
     func body(content: Content) -> AnyView {
-        if #available(iOS 26, *), colorScheme == .dark {
+        if #available(iOS 26, *), colorScheme == .dark, glassStyle == .liquid {
             return AnyView(content.glassEffect(interactive ? .regular.interactive() : .regular, in: shape))
         }
         return AnyView(content.background(shape.fill(Color(.secondarySystemGroupedBackground))))

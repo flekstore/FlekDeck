@@ -192,14 +192,16 @@ struct FlekScreenshotViewer: View {
 
 private extension View {
     /// The close button's surface: real Liquid Glass where the system has it,
-    /// and the frosted circle it had before everywhere else. Interactive, so a
-    /// press deforms the glass the way every other system control does.
+    /// and the frosted circle it had before everywhere else, the frosted glass
+    /// style included. Interactive, so a press deforms the glass the way every
+    /// other system control does. The style is read rather than watched: it can't
+    /// be changed while the viewer is up.
     // Erased to AnyView so the iOS 26-only type `glassEffect` produces isn't
     // baked into this function's static type — the runtime resolves that type
     // before the availability check runs, and traps on older systems where the
     // type is absent.
     func closeButtonGlass() -> AnyView {
-        if #available(iOS 26, *) {
+        if #available(iOS 26, *), LCUtils.appGroupUserDefault.string(forKey: FlekDeckKeys.glassStyle) != FlekGlassStyle.frosted.rawValue {
             return AnyView(self.glassEffect(.regular.interactive(), in: .circle))
         }
         return AnyView(

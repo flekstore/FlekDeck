@@ -12,6 +12,8 @@ struct LCSpringboardRepresentable: UIViewControllerRepresentable {
 
     @Binding var items: [FlekHomeItem]
     let darkModeIcon: Bool
+    /// Liquid Glass cards, or frosted ones: see `FlekGlassStyle`.
+    let drawsGlass: Bool
     @Binding var isEditing: Bool
     var onTap: (FlekHomeItem) -> Void
     var onDelete: (FlekHomeItem) -> Void
@@ -22,6 +24,7 @@ struct LCSpringboardRepresentable: UIViewControllerRepresentable {
     func makeUIViewController(context: Context) -> LCSpringboardViewController {
         let vc = LCSpringboardViewController()
         vc.darkModeIcon = darkModeIcon
+        vc.drawsGlass = drawsGlass
         vc.onTap = onTap
         vc.onDelete = onDelete
         vc.onReorder = { [self] newItems in
@@ -76,6 +79,12 @@ struct LCSpringboardRepresentable: UIViewControllerRepresentable {
         // Dark mode icon
         if vc.darkModeIcon != darkModeIcon {
             vc.darkModeIcon = darkModeIcon
+            vc.outerCollectionView?.reloadData()
+        }
+
+        // Glass style changed on Personalization: every card is made again.
+        if vc.drawsGlass != drawsGlass {
+            vc.drawsGlass = drawsGlass
             vc.outerCollectionView?.reloadData()
         }
 

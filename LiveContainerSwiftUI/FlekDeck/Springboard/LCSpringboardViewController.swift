@@ -37,6 +37,8 @@ final class LCSpringboardViewController: UIViewController {
     private(set) var isInEditMode: Bool = false
 
     var darkModeIcon: Bool = false
+    /// Whether the icons' cards are Liquid Glass, or frosted: see `FlekGlassStyle`.
+    var drawsGlass = true
     
 
     // MARK: - Callbacks (set by Representable)
@@ -729,6 +731,7 @@ extension LCSpringboardViewController: UICollectionViewDataSource {
         cell.items = pages[indexPath.item]
         cell.delegate = self
         cell.darkModeIcon = darkModeIcon
+        cell.drawsGlass = drawsGlass
         cell.draggedItemId = dragManager.currentOperation?.itemId
         cell.collectionView.reloadData()
 

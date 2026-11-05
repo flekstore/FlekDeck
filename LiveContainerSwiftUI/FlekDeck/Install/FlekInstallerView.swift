@@ -1696,13 +1696,14 @@ private extension View {
 /// bars read as the same material.
 private struct RepoPillSurface: ViewModifier {
     @Environment(\.colorScheme) private var colorScheme
+    @AppStorage(FlekDeckKeys.glassStyle, store: LCUtils.appGroupUserDefault) private var glassStyle: FlekGlassStyle = .liquid
 
     // Returns AnyView rather than an opaque type, so the iOS 26-only type
     // `glassEffect` produces stays out of this modifier's static type — the
     // runtime resolves that before the availability check runs, and traps on
     // older systems where the type is absent.
     func body(content: Content) -> AnyView {
-        if #available(iOS 26, *) {
+        if #available(iOS 26, *), glassStyle == .liquid {
             return AnyView(content.clipShape(Capsule()).glassEffect(.regular, in: Capsule()))
         }
         let isDark = colorScheme == .dark
@@ -1791,9 +1792,10 @@ private struct OneSideCut: Shape {
 private struct RepoChipSurface: ViewModifier {
     let selected: Bool
     @Environment(\.colorScheme) private var colorScheme
+    @AppStorage(FlekDeckKeys.glassStyle, store: LCUtils.appGroupUserDefault) private var glassStyle: FlekGlassStyle = .liquid
 
     func body(content: Content) -> AnyView {
-        if #available(iOS 26, *) {
+        if #available(iOS 26, *), glassStyle == .liquid {
             guard selected else { return AnyView(content) }
             // Subtle grey tint so the selected thumb reads against the glass pill.
             return AnyView(content.glassEffect(.regular.tint(Color.gray.opacity(0.3)), in: Capsule()))
