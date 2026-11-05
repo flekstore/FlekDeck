@@ -238,8 +238,27 @@ class SharedModel: ObservableObject {
             publishCertificateInvalid(false)
             return
         }
-        let digest = Self.digest(of: data)
-        let expiry = LCUtils.getCertInfo(withKeyData: data, password: password)?["notAfter"] as? Date
+        // Read on a queue of its own: the expiry is inside the certificate,
+        // which has to be decrypted to get at it, on every return to the
+        // foreground. Quick on a new phone, a hitch on an older one.
+        Self.certificateQueue.async { [weak self] in
+            let digest = Self.digest(of: data)
+            let expiry = LCUtils.getCertInfo(withKeyData: data, password: password)?["notAfter"] as? Date
+            DispatchQueue.main.async {
+                self?.certificateRead(digest: digest, expiry: expiry)
+            }
+        }
+    }
+
+    private static let certificateQueue = DispatchQueue(label: "FlekCertificateValidity", qos: .utility)
+
+    /// What `refreshCertificateValidity` read, back on the main queue.
+    private func certificateRead(digest: String, expiry: Date?) {
+        // A certificate replaced or removed while this one was being read has
+        // a read of its own on the way, and this one is about neither.
+        guard isCertificateImported, LCUtils.certificateData().map(Self.digest(of:)) == digest else {
+            return
+        }
         let isExpired = expiry.map { $0 < Date() } ?? false
         let defaults = UserDefaults.standard
         publishCertificateInvalid(isExpired || defaults.string(forKey: Self.revokedCertificateKey) == digest)
@@ -252,24 +271,27 @@ class SharedModel: ObservableObject {
         defaults.set(digest, forKey: Self.revocationAskedForKey)
         defaults.set(Date().timeIntervalSince1970, forKey: Self.revocationAskedAtKey)
         // As ZSign's check reports it: 0 good, 1 revoked, anything else no
-        // answer.
-        _ = LCUtils.validateCertificate { [weak self] status, _, _, _ in
-            DispatchQueue.main.async {
-                // An answer about a certificate replaced meanwhile is dropped.
-                guard let self, LCUtils.certificateData().map(Self.digest(of:)) == digest else {
-                    return
-                }
-                switch status {
-                case 0:
-                    if defaults.string(forKey: Self.revokedCertificateKey) == digest {
-                        defaults.removeObject(forKey: Self.revokedCertificateKey)
+        // answer. Asked from the same queue, as it decrypts the certificate
+        // again before it sends anything.
+        Self.certificateQueue.async { [weak self] in
+            _ = LCUtils.validateCertificate { status, _, _, _ in
+                DispatchQueue.main.async {
+                    // An answer about a certificate replaced meanwhile is dropped.
+                    guard let self, LCUtils.certificateData().map(Self.digest(of:)) == digest else {
+                        return
                     }
-                    self.publishCertificateInvalid(false)
-                case 1:
-                    defaults.set(digest, forKey: Self.revokedCertificateKey)
-                    self.publishCertificateInvalid(true)
-                default:
-                    break
+                    switch status {
+                    case 0:
+                        if defaults.string(forKey: Self.revokedCertificateKey) == digest {
+                            defaults.removeObject(forKey: Self.revokedCertificateKey)
+                        }
+                        self.publishCertificateInvalid(false)
+                    case 1:
+                        defaults.set(digest, forKey: Self.revokedCertificateKey)
+                        self.publishCertificateInvalid(true)
+                    default:
+                        break
+                    }
                 }
             }
         }
