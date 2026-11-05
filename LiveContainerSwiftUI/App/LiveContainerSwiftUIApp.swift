@@ -5,6 +5,7 @@
 //  Created by s s on 2025/5/16.
 //
 import SwiftUI
+import Kingfisher
 
 @main
 struct LiveContainerSwiftUIApp : SwiftUI.App {
@@ -38,6 +39,13 @@ struct LiveContainerSwiftUIApp : SwiftUI.App {
         FlekBuiltInJIT.adoptWhereNothingIsChosen()
 
         LCPath.clearStaleShareInbox()
+
+        // Kingfisher's defaults let its memory cache grow to a quarter of the
+        // device's memory, some 2 GB on a phone with 8, and its disk cache without
+        // limit, every icon's original kept beside its downsized copy. An image
+        // let go of is read back from disk or fetched again when it is next shown.
+        ImageCache.default.memoryStorage.config.totalCostLimit = 150 * 1024 * 1024
+        ImageCache.default.diskStorage.config.sizeLimit = 300 * 1024 * 1024
 
         // Before the app list is read. A private app opened in a window is staged
         // into the app group until the window closes, so a FlekDeck killed with

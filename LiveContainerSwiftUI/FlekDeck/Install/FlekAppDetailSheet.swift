@@ -102,8 +102,9 @@ final class FlekAppDetailModel: ObservableObject {
         await withCheckedContinuation { continuation in
             // Memory only, to match how the gallery and the viewer load these —
             // otherwise measuring the first shot would be the one thing that
-            // writes a screenshot to disk.
-            KingfisherManager.shared.retrieveImage(with: url, options: [.cacheMemoryOnly]) { result in
+            // writes a screenshot to disk. Decoded here too, as the gallery's
+            // are, since the gallery then shows this copy.
+            KingfisherManager.shared.retrieveImage(with: url, options: [.cacheMemoryOnly, .backgroundDecode]) { result in
                 continuation.resume(returning: (try? result.get())?.image.size)
             }
         }
@@ -788,6 +789,11 @@ private struct FlekScreenshotThumb: View {
                 // pages would grow it without bound for images that are only
                 // worth keeping while the page is open.
                 .cacheMemoryOnly()
+                // Decoded on Kingfisher's queue rather than by the first frame
+                // that draws it, on the main thread: a full-size shot is some
+                // 14 MB of pixels. Kept full size, because the viewer opens on
+                // this same copy.
+                .backgroundDecode()
                 .cancelOnDisappear(true)
                 .onSuccess { _ in reveal() }
                 // Scrolling a shot off the row cancels its request; that isn't a
