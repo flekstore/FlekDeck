@@ -176,6 +176,9 @@ static UIInterfaceOrientation LCWindowOrientation(UIView *view, UIMutableApplica
     /// trusted that object to still hold the guest's orientation when it came to
     /// be read. An ivar cannot be clobbered by a settings merge.
     UIInterfaceOrientation _lockedGuestOrientation;
+    /// The window was to be re-framed while it flew into its icon, and was left
+    /// where it stood instead; it is caught up once it has landed, out of sight.
+    BOOL _geometryHeldInFlight;
 }
 - (instancetype)initWindowName:(NSString*)windowName bundleId:(NSString*)bundleId dataUUID:(NSString*)dataUUID rootVC:(UIViewController*)rootVC {
     self = [super initWithNibName:nil bundle:nil];
@@ -451,6 +454,10 @@ static UIInterfaceOrientation LCWindowOrientation(UIView *view, UIMutableApplica
     self.view.hidden = YES;
     self.view.transform = CGAffineTransformIdentity;
     [self.view.superview sendSubviewToBack:self.view];
+    if(_geometryHeldInFlight) {
+        _geometryHeldInFlight = NO;
+        [self applyMaximizedLayout];
+    }
 }
 
 - (void)minimizeWindowPiP {
@@ -641,6 +648,11 @@ static UIInterfaceOrientation LCWindowOrientation(UIView *view, UIMutableApplica
     
     // HARD LOCK: same rule on the host-diff path — hold the shape while flat.
     BOOL frozen = LCRotationIsLocked() && _lockedGuestOrientation != UIInterfaceOrientationUnknown;
+    // And while the window flies into its icon; see -applyMaximizedGeometryToSettings:.
+    if(!frozen && [LCWindowFlight holdsGeometryOfView:self.view]) {
+        frozen = YES;
+        _geometryHeldInFlight = YES;
+    }
     if(!frozen) {
         if(self.isMaximized) {
             [self updateMaximizedFrameWithSettings:newSettings];
@@ -840,6 +852,17 @@ static UIInterfaceOrientation LCWindowOrientation(UIView *view, UIMutableApplica
     // Gated on having a settled orientation so a guest opened while the phone is
     // already flat still gets its initial layout; only re-derivation is blocked.
     if(LCRotationIsLocked() && _lockedGuestOrientation != UIInterfaceOrientationUnknown) return;
+    // Nor while the window flies into its icon. The flight was aimed from where
+    // the window stood as it set off, and a window moved under it lands off its
+    // icon by as much as it moved. That is what the bar sliding away on the way
+    // home did: its strip measures nothing as it goes, so a window re-framed then
+    // grew by the bar's height and dropped by half of it. Caught up in
+    // -finishMinimizeWindow, once the window is out of sight.
+    if([LCWindowFlight holdsGeometryOfView:self.view]) {
+        _geometryHeldInFlight = YES;
+        return;
+    }
+    _geometryHeldInFlight = NO;
     [self updateMaximizedFrameWithSettings:settings];
     [self applySceneFrameToSettings:settings orientation:LCGuestSceneOrientation(settings)];
 }

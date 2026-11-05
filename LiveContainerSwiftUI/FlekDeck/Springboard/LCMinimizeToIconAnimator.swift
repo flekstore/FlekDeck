@@ -260,6 +260,22 @@ enum LCMinimizeToIconAnimator {
         }
     }
 
+    /// The operations that are windows going into their icons. A window stands
+    /// still for the length of one: see `holdsGeometry(of:)`.
+    private static var closings: Set<Int> = []
+
+    /// Whether `view` is on its way into an icon, and so has to be left where it
+    /// stands until it lands. The flight is aimed from where the window set off,
+    /// and a window moved under it carries its landing with it, off its icon by as
+    /// far as it moved. A guest window is re-framed from more places than a flight
+    /// can rule out: the host's settings arriving on a tilt of the phone, a
+    /// relayout, the bar announcing itself. And while the bar slides away on the
+    /// way home its strip measures nothing, so a window re-framed then takes the
+    /// bar's height on at the bottom and drops by half of it.
+    static func holdsGeometry(of view: UIView) -> Bool {
+        operations[ObjectIdentifier(view)].map(closings.contains) ?? false
+    }
+
     // MARK: - Entry points
 
     /// Flies `view` into the icon for `itemID` in the home dock, then hides it:
@@ -280,7 +296,12 @@ enum LCMinimizeToIconAnimator {
         view.alpha = 1
 
         let token = beginOperation(on: view)
+        closings.insert(token)
         let finish = {
+            // Free to be re-framed again, whichever way the flight ended: the
+            // window has landed and is about to be hidden, or something newer has
+            // it.
+            closings.remove(token)
             // Something may have brought the window back while it was still on its
             // way out. A newer operation on the same view owns it now, and hiding
             // it here would take away a window the user has just asked for — as
@@ -1094,6 +1115,17 @@ enum LCMinimizeToIconAnimator {
                              height: fallbackTargetSize))
     }
 
+}
+
+// MARK: - For the window controller
+
+/// What the guest window's controller has to ask of a flight. It is written in
+/// Objective-C, and the animator, an enum, is out of its reach.
+@objc(LCWindowFlight) final class LCWindowFlight: NSObject {
+    /// See `LCMinimizeToIconAnimator.holdsGeometry(of:)`.
+    @objc(holdsGeometryOfView:) static func holdsGeometry(of view: UIView) -> Bool {
+        LCMinimizeToIconAnimator.holdsGeometry(of: view)
+    }
 }
 
 // MARK: - Next frame
