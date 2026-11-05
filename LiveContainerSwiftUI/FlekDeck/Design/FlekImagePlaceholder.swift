@@ -41,11 +41,9 @@ struct FlekImagePlaceholder: View {
         RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
             .fill(FlekPlaceholderStyle.fill)
             .opacity(dimmed ? FlekPlaceholderStyle.dimmedOpacity : 1)
-            .onAppear {
-                guard pulses, let animation = FlekPlaceholderStyle.pulse(reduceMotion: reduceMotion)
-                else { return }
-                withAnimation(animation) { dimmed = true }
-            }
+            // Stops when `pulses` is turned off, and while the page is out of
+            // sight, rather than running on for as long as the view exists.
+            .flekRepeating(FlekPlaceholderStyle.pulse(reduceMotion: reduceMotion), phase: $dimmed, while: pulses)
             .accessibilityHidden(true)
     }
 }

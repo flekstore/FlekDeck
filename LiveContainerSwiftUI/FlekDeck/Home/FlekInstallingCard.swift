@@ -139,7 +139,7 @@ private struct FlekSpinningRing: View {
     let size: CGFloat
     let lineWidth: CGFloat
 
-    @State private var rotation: Double = 0
+    @State private var spinning = false
 
     var body: some View {
         ZStack {
@@ -148,13 +148,9 @@ private struct FlekSpinningRing: View {
             Circle()
                 .trim(from: 0, to: 0.7)
                 .stroke(flekBlue, style: StrokeStyle(lineWidth: lineWidth, lineCap: .round))
-                .rotationEffect(.degrees(rotation))
+                .rotationEffect(.degrees(spinning ? 360 : 0))
         }
         .frame(width: size, height: size)
-        .onAppear {
-            withAnimation(.linear(duration: 1.0).repeatForever(autoreverses: false)) {
-                rotation = 360
-            }
-        }
+        .flekRepeating(.linear(duration: 1.0).repeatForever(autoreverses: false), phase: $spinning)
     }
 }

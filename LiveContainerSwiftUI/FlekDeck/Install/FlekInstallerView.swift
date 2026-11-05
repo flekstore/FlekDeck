@@ -1990,10 +1990,8 @@ struct FlekInstallerSkeletonRow: View {
         .background(RoundedRectangle(cornerRadius: 24, style: .continuous)
             .fill(Color(.secondarySystemGroupedBackground)))
         .opacity(dim ? FlekPlaceholderStyle.dimmedOpacity : 1)
-        .onAppear {
-            guard let animation = FlekPlaceholderStyle.pulse(reduceMotion: reduceMotion) else { return }
-            withAnimation(animation) { dim = true }
-        }
+        // Held still while the page is out of sight, as image placeholders are.
+        .flekRepeating(FlekPlaceholderStyle.pulse(reduceMotion: reduceMotion), phase: $dim)
         // Nothing here is real content, so keep it away from VoiceOver and taps.
         .accessibilityHidden(true)
         .allowsHitTesting(false)
@@ -2057,12 +2055,19 @@ struct FlekRemoteIcon: View {
     var corner: CGFloat
 
     @Environment(\.displayScale) private var displayScale
+    /// Set once the icon could not be had, as opposed to its request being called
+    /// off by the row scrolling away. The placeholder stays but stops pulsing: a
+    /// pulse outlasting the request reads as still loading, and keeps the screen
+    /// redrawing for as long as the row is on it.
+    @State private var failed = false
 
     var body: some View {
         KFImage(URL(string: url))
             .placeholder {
-                FlekImagePlaceholder(cornerRadius: corner)
+                FlekImagePlaceholder(cornerRadius: corner, pulses: !failed)
             }
+            .onSuccess { _ in failed = false }
+            .onFailure { error in failed = !error.isTaskCancelled }
             // Decode/downsample to the display size instead of full resolution, and
             // cancel in-flight loads when the row scrolls away — keeps long result
             // lists smooth and bounds memory.

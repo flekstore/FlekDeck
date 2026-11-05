@@ -3277,7 +3277,10 @@ class AppInfoProvider {
             return
         }
         
-        let hostVC = UIHostingController(rootView: AnyView(content()))
+        // A page minimized into the dock is only hidden, and SwiftUI animates what
+        // it cannot see. Its views are told, so their endless animations stop.
+        let visibility = FlekPageVisibility()
+        let hostVC = UIHostingController(rootView: AnyView(FlekPageVisibilityRoot(visibility: visibility, content: content())))
         hostVC.view.frame = windowHostingView.bounds
         hostVC.view.autoresizingMask = [.flexibleWidth, .flexibleHeight]
         if isSwitcherBarVisible {
@@ -3298,6 +3301,7 @@ class AppInfoProvider {
         // Hidden from the moment it is in the hierarchy, so the frame before the
         // opening animation starts is not a full-screen page appearing whole.
         hostVC.view.alpha = 0
+        visibility.track(hostVC.view)
 
         let appModel = DockAppModel(appName: name, appUUID: uuid, view: hostVC.view, internalPageKind: kind)
         

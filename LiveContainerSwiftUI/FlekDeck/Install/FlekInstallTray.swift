@@ -182,18 +182,14 @@ private struct FlekTravellingSegment: View {
     let width: CGFloat
     let accent: Color
 
-    @State private var offset: CGFloat = 0
+    @State private var travelling = false
 
     var body: some View {
         Capsule()
             .fill(accent)
             .frame(width: width * 0.35)
-            .offset(x: offset)
-            .onAppear {
-                withAnimation(.easeInOut(duration: 0.9).repeatForever(autoreverses: true)) {
-                    offset = width * 0.65
-                }
-            }
+            .offset(x: travelling ? width * 0.65 : 0)
+            .flekRepeating(.easeInOut(duration: 0.9).repeatForever(autoreverses: true), phase: $travelling)
     }
 }
 
