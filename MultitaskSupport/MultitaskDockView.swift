@@ -4392,6 +4392,15 @@ final class MultitaskOverlayRootViewController: UIViewController {
     var onHostRotationBegan: (() -> Void)?
     var onHostRotationEnded: (() -> Void)?
 
+    /// The bottom edge's first swipe is FlekDeck's, and iOS goes home on a second
+    /// one. iOS takes that from a single window, the topmost that drives the
+    /// system's appearance, and once this window is up it is that one, over an app
+    /// and on the home screen alike. Without this the home screen's own request
+    /// (`DeferBottomHomeGestureModifier` in LCTabView) never reached iOS: the first
+    /// swipe always went home, and the bottom swipe that opens the switcher never
+    /// got a touch.
+    override var preferredScreenEdgesDeferringSystemGestures: UIRectEdge { .bottom }
+
     override func loadView() {
         let root = OverlayPassthroughView()
         root.backgroundColor = .clear

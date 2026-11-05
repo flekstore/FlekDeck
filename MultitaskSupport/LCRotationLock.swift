@@ -439,4 +439,18 @@ private final class LockPassthroughWindow: UIWindow {
         // root controller.
         return hit === self ? nil : hit
     }
+
+    /// Leaves the system's appearance to the app's own windows. UIKit takes it from
+    /// the topmost window that can affect it: the status bar's visibility, and the
+    /// screen edges where iOS holds its own gestures back. This one sits above
+    /// everything with no view controller to ask, so the status bar was shown
+    /// wherever iOS would have hidden it (on the iPhone Duo's cover display, the
+    /// time and Wi-Fi over the top corner of an app held in landscape), and no
+    /// edge was ever held back: the first swipe up always went home, past the
+    /// bottom swipe that opens the switcher. A private UIKit method, overridden
+    /// the way UIKit's own overlay windows (the text effects window and others)
+    /// opt out; the window is otherwise untouched, since its being there is what
+    /// the rotation lock depends on.
+    @objc(_canAffectStatusBarAppearance)
+    private func canAffectStatusBarAppearance() -> Bool { false }
 }
