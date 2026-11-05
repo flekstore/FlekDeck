@@ -787,6 +787,19 @@
     if (!_autoSaveDisabled) [self save];
 }
 
+- (NSString *)jitLaunchScriptName {
+    return _info[@"jitLaunchScriptName"];
+}
+
+- (void)setJitLaunchScriptName:(NSString *)jitLaunchScriptName {
+    if (jitLaunchScriptName.length > 0) {
+        _info[@"jitLaunchScriptName"] = jitLaunchScriptName;
+    } else {
+        [_info removeObjectForKey:@"jitLaunchScriptName"];
+    }
+    if (!_autoSaveDisabled) [self save];
+}
+
 - (NSString *)selected32BitEmulator {
     return _info[@"selected32BitEmulator"];
 }

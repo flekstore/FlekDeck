@@ -46,6 +46,8 @@ typedef NS_ENUM(NSInteger, MultitaskSpecified){
 // FlekDeck's bundled Location Spoofer, loaded by TweakLoader
 @property bool spoofLocation;
 @property (nonatomic, strong) NSString* jitLaunchScriptJs;
+// The file a custom script was picked from, shown with it in the app's settings
+@property (nonatomic, strong) NSString* jitLaunchScriptName;
 @property (nonatomic, strong) NSString* selected32BitEmulator;
 @property NSDate* lastLaunched;
 @property NSDate* installationDate;

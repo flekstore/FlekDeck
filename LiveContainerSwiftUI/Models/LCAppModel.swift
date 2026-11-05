@@ -115,6 +115,18 @@ class LCAppModel: ObservableObject, Hashable {
     @Published var jitLaunchScriptJs: String? {
         didSet {
             appInfo.jitLaunchScriptJs = jitLaunchScriptJs
+            // A name only goes with a picked file's contents: the default, a
+            // built-in script and a Custom with nothing picked yet have none.
+            let script = jitLaunchScriptJs ?? ""
+            if (script.isEmpty || script.hasPrefix("/")) && jitLaunchScriptName != nil {
+                jitLaunchScriptName = nil
+            }
+        }
+    }
+    /// The name of the file a custom script was picked from.
+    @Published var jitLaunchScriptName: String? {
+        didSet {
+            appInfo.jitLaunchScriptName = jitLaunchScriptName
         }
     }
     /// The script as an external JIT enabler takes it: its contents,
@@ -305,6 +317,7 @@ class LCAppModel: ObservableObject, Hashable {
         self.uiDontLoadTweakLoader = appInfo.dontLoadTweakLoader
         self.uiDontSign = appInfo.dontSign
         self.jitLaunchScriptJs = appInfo.jitLaunchScriptJs
+        self.jitLaunchScriptName = appInfo.jitLaunchScriptName
         self.uiSelected32BitEmulator = appInfo.selected32BitEmulator ?? ""
         self.uiSpoofSDKVersion = appInfo.spoofSDKVersion
         self.uiSpoofLocation = appInfo.spoofLocation

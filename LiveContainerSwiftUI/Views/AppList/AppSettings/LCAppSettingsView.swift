@@ -11,17 +11,6 @@ import UIKit
 import UniformTypeIdentifiers
 
 struct LCAppSettingsView: View {
-    @State private var documentPickerCoordinator = DocumentPickerCoordinator()
-
-    private class DocumentPickerCoordinator: NSObject, UIDocumentPickerDelegate {
-        var onDocumentPicked: ((URL) -> Void)?
-
-        func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
-            guard let url = urls.first else { return }
-            onDocumentPicked?(url)
-        }
-    }
-    
     private var appInfo : LCAppInfo
     
     @ObservedObject private var model : LCAppModel
@@ -33,6 +22,7 @@ struct LCAppSettingsView: View {
     @StateObject private var signUnsignedAlert = YesNoHelper()
     @StateObject private var addExternalNonLocalContainerWarningAlert = YesNoHelper()
     @State var choosingStorage = false
+    @State private var choosingJITScript = false
     
     @State private var errorShow = false
     @State private var errorInfo = ""
@@ -167,32 +157,17 @@ struct LCAppSettingsView: View {
                         }
                     if !isBuiltinScript {
                         Button(action: {
-                            // This will trigger the file picker
-                            let picker = UIDocumentPickerViewController(forOpeningContentTypes: [.javaScript], asCopy: true)
-                            picker.allowsMultipleSelection = false
-                            documentPickerCoordinator.onDocumentPicked = { url in
-                                do {
-                                    let data = try Data(contentsOf: url)
-                                    // Store the Base64-encoded string of the file content
-                                    model.jitLaunchScriptJs = data.base64EncodedString()
-                                } catch {
-                                    errorInfo = "Failed to read file: \(error.localizedDescription)"
-                                    errorShow = true
-                                }
-                            }
-                            picker.delegate = documentPickerCoordinator
-
-                            if let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
-                               let rootViewController = windowScene.windows.first?.rootViewController {
-                                rootViewController.present(picker, animated: true)
-                            }
+                            choosingJITScript = true
                         }) {
                             HStack {
                                 Spacer()
                                 if let base64String = model.jitLaunchScriptJs, !base64String.isEmpty {
-                                    // Show a generic name since we're not storing the filename
-                                    Text("lc.appSettings.jit26.scriptLoaded".loc)
+                                    // A script picked before its name was kept
+                                    // has none, and says it is loaded instead
+                                    Text(model.jitLaunchScriptName ?? "lc.appSettings.jit26.scriptLoaded".loc)
                                         .foregroundColor(.primary)
+                                        .lineLimit(1)
+                                        .truncationMode(.middle)
                                 } else {
                                     Text("lc.common.noFileSelected".loc)
                                         .foregroundColor(.gray)
@@ -505,6 +480,22 @@ struct LCAppSettingsView: View {
         }
         .fileImporter(isPresented: $choosingStorage, allowedContentTypes: [.folder]) { result in
             Task { await importDataStorage(result: result) }
+        }
+        // Presents over this page, which is itself in a sheet: the window's
+        // root controller is busy presenting that, and refuses a second one.
+        .betterFileImporter(isPresented: $choosingJITScript, types: [.javaScript]) { urls in
+            guard let url = urls.first else { return }
+            do {
+                // Stored as the file's contents, Base64-encoded, with its name
+                // to show in the row
+                model.jitLaunchScriptJs = try Data(contentsOf: url).base64EncodedString()
+                model.jitLaunchScriptName = url.lastPathComponent
+            } catch {
+                errorInfo = "Failed to read file: \(error.localizedDescription)"
+                errorShow = true
+            }
+        } onDismiss: {
+            choosingJITScript = false
         }
     }
 

@@ -2360,6 +2360,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             finalNewApp.spoofLocation = appToReplace.appInfo.spoofLocation
             finalNewApp.lastLaunched = appToReplace.appInfo.lastLaunched
             finalNewApp.jitLaunchScriptJs = appToReplace.appInfo.jitLaunchScriptJs
+            finalNewApp.jitLaunchScriptName = appToReplace.appInfo.jitLaunchScriptName
             finalNewApp.multitaskSpecified = appToReplace.appInfo.multitaskSpecified
             finalNewApp.classicMode = appToReplace.appInfo.classicMode
             finalNewApp.autoSaveDisabled = false
