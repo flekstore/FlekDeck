@@ -274,13 +274,33 @@ final class LCSpringboardPageCell: UICollectionViewCell {
 
     // MARK: - Init
 
+    /// The page's glass, gathered in one container. Each icon's card is a glass
+    /// view of its own, two dozen to a page, and glass in a container is drawn
+    /// as a group rather than one effect at a time, which is what Apple has
+    /// for many glass elements side by side. Spacing 0, so that cards merge
+    /// only where they actually touch, which they never do on the grid.
+    private let glassContainer: UIVisualEffectView? = {
+        guard #available(iOS 26, *) else { return nil }
+        let effect = UIGlassContainerEffect()
+        effect.spacing = 0
+        let view = UIVisualEffectView(effect: effect)
+        view.clipsToBounds = false
+        view.contentView.clipsToBounds = false
+        return view
+    }()
+
     override init(frame: CGRect) {
         super.init(frame: frame)
 
         clipsToBounds = false
         contentView.clipsToBounds = false
 
-        contentView.addSubview(collectionView)
+        if let glassContainer {
+            contentView.addSubview(glassContainer)
+            glassContainer.contentView.addSubview(collectionView)
+        } else {
+            contentView.addSubview(collectionView)
+        }
         collectionView.dataSource = self
         collectionView.delegate = self
     }
@@ -291,6 +311,7 @@ final class LCSpringboardPageCell: UICollectionViewCell {
 
     override func layoutSubviews() {
         super.layoutSubviews()
+        glassContainer?.frame = contentView.bounds
         collectionView.frame = contentView.bounds
         updateFlowLayout()
     }

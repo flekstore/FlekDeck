@@ -3559,9 +3559,15 @@ class AppInfoProvider {
         // cards, so hide them for the render and restore immediately (same run
         // loop, no screen update = no flicker).
         var hiddenEffectViews: [UIView] = []
+        // Except a glass container, which draws nothing of its own: a page of
+        // the springboard keeps its icons inside one, and they would go with it.
+        func isGlassContainer(_ view: UIView) -> Bool {
+            guard #available(iOS 26, *) else { return false }
+            return (view as? UIVisualEffectView)?.effect is UIGlassContainerEffect
+        }
         func hideEffectViews(in view: UIView) {
             for sub in view.subviews {
-                if sub is UIVisualEffectView, !sub.isHidden {
+                if sub is UIVisualEffectView, !sub.isHidden, !isGlassContainer(sub) {
                     sub.isHidden = true
                     hiddenEffectViews.append(sub)
                 }
