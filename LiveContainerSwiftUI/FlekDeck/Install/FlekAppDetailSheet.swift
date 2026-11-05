@@ -102,9 +102,12 @@ final class FlekAppDetailModel: ObservableObject {
         await withCheckedContinuation { continuation in
             // Memory only, to match how the gallery and the viewer load these —
             // otherwise measuring the first shot would be the one thing that
-            // writes a screenshot to disk. Decoded here too, as the gallery's
-            // are, since the gallery then shows this copy.
-            KingfisherManager.shared.retrieveImage(with: url, options: [.cacheMemoryOnly, .backgroundDecode]) { result in
+            // writes a screenshot to disk. Decoded here too, and at the same
+            // size, as the gallery's are, since the gallery then shows this copy.
+            let decoding = FlekImageMemory.screenshotDecoding(height: FlekAppDetailSheet.maxScreenshotHeight)
+            let options: KingfisherOptionsInfo = [.cacheMemoryOnly, .backgroundDecode,
+                                                  .processor(decoding.processor), .scaleFactor(decoding.scale)]
+            KingfisherManager.shared.retrieveImage(with: url, options: options) { result in
                 continuation.resume(returning: (try? result.get())?.image.size)
             }
         }
@@ -185,7 +188,7 @@ struct FlekAppDetailSheet: View {
     private static let iconSize: CGFloat = 130
     /// Tallest the screenshot row is allowed to get. Portrait shots reach it;
     /// landscape ones are limited by width instead.
-    private static let maxScreenshotHeight: CGFloat = 380
+    fileprivate static let maxScreenshotHeight: CGFloat = 380
     /// Gap between shots, shared with the skeleton row so the two are laid out
     /// alike and the swap from one to the other moves nothing.
     private static let gallerySpacing: CGFloat = 10
@@ -765,6 +768,8 @@ private struct FlekScreenshotThumb: View {
     @State private var loaded = false
     @State private var failed = false
 
+    private static let decoding = FlekImageMemory.screenshotDecoding(height: FlekAppDetailSheet.maxScreenshotHeight)
+
     var body: some View {
         ZStack {
             // A shot that never arrives keeps its block but stops breathing —
@@ -784,15 +789,17 @@ private struct FlekScreenshotThumb: View {
                 // up to thousands of points wide and pushes the rest of the row
                 // off the screen.
                 .placeholder { Color.clear.frame(width: slotWidth, height: height) }
-                // Never written to disk. Screenshots are far larger than icons
-                // and Kingfisher's disk cache has no size limit, so browsing app
-                // pages would grow it without bound for images that are only
-                // worth keeping while the page is open.
+                // Full size, unless the phone is short of memory: see
+                // `FlekImageMemory.screenshotDecoding`.
+                .setProcessor(Self.decoding.processor)
+                .scaleFactor(Self.decoding.scale)
+                // Never written to disk. Screenshots are far larger than icons,
+                // and browsing app pages would fill the disk cache with images
+                // only worth keeping while the page is open.
                 .cacheMemoryOnly()
                 // Decoded on Kingfisher's queue rather than by the first frame
                 // that draws it, on the main thread: a full-size shot is some
-                // 14 MB of pixels. Kept full size, because the viewer opens on
-                // this same copy.
+                // 14 MB of pixels.
                 .backgroundDecode()
                 .cancelOnDisappear(true)
                 .onSuccess { _ in reveal() }
