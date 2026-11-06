@@ -5623,15 +5623,50 @@ struct AppSwitcherOverlay: View {
     /// deep bar the header above and the chin below can want more room than is left.
     /// The cap only binds there; everywhere else the card is still exactly its
     /// snapshot's shape.
-    private var cardHeight: CGFloat {
+    ///
+    /// The width it keeps is the screen's less the side insets, which the snapshot
+    /// drops too. An iPhone held upright has none; an iPhone Duo's status bar runs
+    /// down one side, an 84pt column of inset, and a card shaped from the whole
+    /// width was too wide for the snapshot it held: filling it cut the app's title
+    /// off the top and its last rows off the bottom.
+    ///
+    /// The shape of a card with no snapshot to go by yet, and of every card on
+    /// iPad. See `cardHeight(for:)` for the rest.
+    private var defaultCardHeight: CGFloat {
         let screen = dockManager.switcherScreenSize
         let insets = dockManager.cachedSafeAreaInsets
         let contentHeight = max(screen.height - insets.bottom, 1)
-        let natural = cardWidth * (contentHeight / screen.width)
-        // Everything the column spends outside the image: the top spacer, the header
-        // row and the gap under it, the minimum gap above the chin, and the chin.
+        let contentWidth = max(screen.width - insets.left - insets.right, 1)
+        return min(cardWidth * (contentHeight / contentWidth), maxCardHeight)
+    }
+
+    /// The tallest a card can be: what the column has left once the top spacer,
+    /// the header row and the gap under it, the minimum gap above the chin, and the
+    /// chin have taken theirs.
+    private var maxCardHeight: CGFloat {
+        let insets = dockManager.cachedSafeAreaInsets
         let chrome = (insets.top + 12) + (cardHeaderHeight + 8) + 20 + chinReserve
-        return min(natural, max(screen.height - chrome, 1))
+        return max(dockManager.switcherScreenSize.height - chrome, 1)
+    }
+
+    /// One app's card, shaped like that app's own snapshot as the card shows it,
+    /// stood upright if it was taken sideways, so filling the card crops next to
+    /// nothing. Cards in a row can then differ in height: on an iPhone Duo the status
+    /// bar's column comes off an upright app's long side but a sideways app's short
+    /// one, and one shape for both cut a fifth off a sideways app's width. Elsewhere
+    /// the two shapes are all but the same.
+    ///
+    /// On iPad every card keeps the screen's shape, as it always has.
+    private func cardHeight(for app: DockAppModel) -> CGFloat {
+        let fallback = defaultCardHeight
+        guard !FlekDeviceModel.isPad,
+              let size = dockManager.appSnapshotSizes[app.appUUID],
+              size.width > 0, size.height > 0 else { return fallback }
+        let turned = dockManager.cardSnapshotRotation(for: app.appUUID,
+                                                      portraitCard: fallback > cardWidth) != 0
+        // Height over width, as the card shows it.
+        let aspect = turned ? size.width / size.height : size.height / size.width
+        return min(cardWidth * aspect, maxCardHeight)
     }
 
     /// What the column keeps free under the cards: the chin's footprint, or with the
@@ -6058,7 +6093,7 @@ struct AppSwitcherOverlay: View {
                 AppSwitcherCard(
                     app: pair.element,
                     cardWidth: cardWidth,
-                    cardHeight: cardHeight,
+                    cardHeight: cardHeight(for: pair.element),
                     cornerRadius: cardCornerRadius,
                     cardIndex: pair.offset
                 )
