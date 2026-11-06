@@ -5660,23 +5660,7 @@ struct AppSwitcherOverlay: View {
             // Falls back to a flat dark blur if no snapshot was captured.
             ZStack {
                 if let snapshot = dockManager.springboardSnapshot {
-                    // Pinned to the window's size, and clipped to it.
-                    //
-                    // `scaledToFill` sizes a view to COVER what it was offered, so it
-                    // reports back something larger in one axis — and this is a sibling
-                    // in the ZStack, so the ZStack grew to match and everything else
-                    // was centred against that instead of against the screen. A
-                    // springboard captured in landscape and drawn in portrait came out
-                    // 1698pt wide inside an 820pt window, which dragged the card row
-                    // 400pt off the left edge. The frame stops it having any say in the
-                    // layout; the clip keeps the overspill from drawing outside.
-                    Image(uiImage: snapshot)
-                        .resizable()
-                        .scaledToFill()
-                        .frame(width: dockManager.switcherScreenSize.width,
-                               height: dockManager.switcherScreenSize.height)
-                        .clipped()
-                        .ignoresSafeArea()
+                    SwitcherBackdropPicture(image: snapshot, screen: dockManager.switcherScreenSize)
                 }
                 // Blur + scrim fade out on exit so the sharp home is revealed
                 // (the snapshot, then the real springboard once the overlay goes).
@@ -6100,6 +6084,56 @@ struct AppSwitcherOverlay: View {
             }
         }
         .padding(.horizontal, (dockManager.switcherScreenSize.width - cardWidth) / 2)
+    }
+}
+
+/// The springboard picture behind the switcher, on the screen exactly where the
+/// springboard itself is, whatever the stack it is drawn in makes of the safe area.
+///
+/// Positioned in the screen's own coordinates rather than centred in its stack.
+/// On an iPhone Duo the status bar's column is all safe-area inset, and SwiftUI
+/// laid this background out shifted by half of it: the picture stood 21pt left of
+/// the screen and stopped that short of its right edge, the overlay's black showed
+/// through, and the blur over the top smeared it into a dark band down that side.
+///
+/// A larger copy lies behind it, for the blur to find picture in past every edge
+/// of the screen rather than black. The copy on top is the screen's size, so what
+/// shows is the springboard at its own scale.
+///
+/// Each a fixed size and clipped to it: `scaledToFill` reports back what it covers,
+/// which would otherwise have its say in the layout. A springboard captured in
+/// landscape and drawn in portrait once came out 1698pt wide in an 820pt window and
+/// dragged the card row 400pt off the left edge.
+private struct SwitcherBackdropPicture: View {
+    let image: UIImage
+    let screen: CGSize
+
+    /// How far past the screen's edges the copy behind reaches: more than the
+    /// switcher's blur draws from.
+    private static let overscan: CGFloat = 48
+
+    var body: some View {
+        GeometryReader { proxy in
+            let origin = proxy.frame(in: .global).origin
+            ZStack {
+                picture(width: screen.width + 2 * Self.overscan, height: screen.height + 2 * Self.overscan)
+                picture(width: screen.width, height: screen.height)
+            }
+            .position(x: screen.width / 2 - origin.x, y: screen.height / 2 - origin.y)
+        }
+        // The screen's size in the layout, as the picture always was, so the
+        // switcher lays out everything else as it did: the cards are centred in
+        // what the side column leaves them. Only what is drawn moves.
+        .frame(width: screen.width, height: screen.height)
+        .ignoresSafeArea()
+    }
+
+    private func picture(width: CGFloat, height: CGFloat) -> some View {
+        Image(uiImage: image)
+            .resizable()
+            .scaledToFill()
+            .frame(width: width, height: height)
+            .clipped()
     }
 }
 
