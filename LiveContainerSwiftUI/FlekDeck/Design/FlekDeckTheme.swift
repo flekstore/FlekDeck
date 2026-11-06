@@ -163,9 +163,10 @@ enum FlekTheme {
     /// The glyph on a button in the column over an app: the share of it the
     /// search button's glyph is of the search button.
     static var sideBarButtonGlyphSize: CGFloat { sideBarButtonSize * 0.42 }
-    /// The app's icon on the app button in that column: the share of the button
-    /// the running apps' icon is of the pill's width.
-    static var sideBarButtonIconSize: CGFloat { sideBarButtonSize * sideBarAppIconSize / sideBarWidth }
+    /// The app's icon on the app button in that column: 30pt in the 48pt circle,
+    /// leaving a ring of the button's glass round it. As large a share as the
+    /// running apps' icon is of the pill, it nearly touched the circle's edge.
+    static var sideBarButtonIconSize: CGFloat { sideBarButtonSize * 0.625 }
 
     /// A navigation control: the circle a back or close button occupies, at the
     /// size the system gives the same buttons in a navigation bar. Fixed rather
