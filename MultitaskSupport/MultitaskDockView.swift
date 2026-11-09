@@ -8252,9 +8252,13 @@ private struct QuickSwitchSwipe: ViewModifier {
 
     func body(content: Content) -> some View {
         content.simultaneousGesture(
-            // Measured in the bar's own space, where the strip lies horizontal
+            // Measured in the button's own space, where the strip lies horizontal
             // whichever edge it is turned onto: along it is always left and right.
-            DragGesture(minimumDistance: 10, coordinateSpace: .global)
+            // Not the global space, which is the window's, unturned: on a phone
+            // on its side, with the bar standing down the chin's edge, it read a
+            // swipe across the bar as one along it, and the swipe that switched
+            // was left to right while the windows slid up and down.
+            DragGesture(minimumDistance: 10, coordinateSpace: .local)
                 .updating($isDragging) { _, dragging, _ in dragging = true }
                 .onChanged { value in
                     let dx = value.translation.width, dy = value.translation.height
