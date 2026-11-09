@@ -13,31 +13,63 @@ import WidgetKit
 
 @main
 struct FlekDeckWidgets: WidgetBundle {
+    init() {
+        _ = SystemGlassBackground.isInstalled
+    }
+
+    // One widget for each size, 2×2, 2×4, 4×4 and from iOS 27 on 4×6, rather
+    // than one widget in four sizes. The home screen only offers to resize a
+    // widget into another size of its own, so these can't be resized in place:
+    // a resized widget loses its glass (SystemGlassBackground), while one
+    // added at its size always has it.
     var body: some Widget {
-        AppsWidget()
+        AppsWidget<SmallAppsWidget>()
+        AppsWidget<MediumAppsWidget>()
+        AppsWidget<LargeAppsWidget>()
+        if #available(iOS 27.0, *) {
+            AppsWidget<ExtraLargeAppsWidget>()
+        }
     }
 }
 
-struct AppsWidget: Widget {
+/// The one size an Apps widget comes in, and the kind it goes by.
+protocol AppsWidgetSize {
+    static var kind: String { get }
+    static var family: WidgetFamily { get }
+}
+
+enum SmallAppsWidget: AppsWidgetSize {
+    static let kind = WidgetAppList.Kind.small
+    static let family = WidgetFamily.systemSmall
+}
+
+enum MediumAppsWidget: AppsWidgetSize {
+    static let kind = WidgetAppList.Kind.medium
+    static let family = WidgetFamily.systemMedium
+}
+
+enum LargeAppsWidget: AppsWidgetSize {
+    static let kind = WidgetAppList.Kind.large
+    static let family = WidgetFamily.systemLarge
+}
+
+@available(iOS 27.0, *)
+enum ExtraLargeAppsWidget: AppsWidgetSize {
+    static let kind = WidgetAppList.Kind.extraLargePortrait
+    static let family = WidgetFamily.systemExtraLargePortrait
+}
+
+struct AppsWidget<Size: AppsWidgetSize>: Widget {
     var body: some WidgetConfiguration {
-        AppIntentConfiguration(kind: WidgetAppList.widgetKind, intent: AppsWidgetConfiguration.self,
+        AppIntentConfiguration(kind: Size.kind, intent: AppsWidgetConfiguration.self,
                                provider: AppsProvider()) { entry in
             AppsWidgetView(entry: entry)
         }
         .configurationDisplayName("Apps")
         .description("Open your FlekDeck apps from the Home Screen.")
-        .supportedFamilies(Self.families)
+        .supportedFamilies([Size.family])
         // The grid spaces its icons out to the widget's edges itself.
         .contentMarginsDisabled()
-    }
-
-    /// 2×2, 2×4 and 4×4, and from iOS 27 on 4×6.
-    private static var families: [WidgetFamily] {
-        var families: [WidgetFamily] = [.systemSmall, .systemMedium, .systemLarge]
-        if #available(iOS 27.0, *) {
-            families.append(.systemExtraLargePortrait)
-        }
-        return families
     }
 }
 

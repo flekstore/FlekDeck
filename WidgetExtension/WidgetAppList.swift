@@ -25,8 +25,15 @@ struct WidgetAppList: Codable, Equatable {
     /// Every app on FlekDeck's home screen, in its order.
     var apps: [App]
 
-    /// The widget's kind, which FlekDeck reloads by.
-    static let widgetKind = "FlekDeckApps"
+    /// The widget's kinds, one for each size (AppsWidget.swift says why).
+    /// FlekDeck reloads them all.
+    enum Kind {
+        static let small = "FlekDeckApps.small"
+        static let medium = "FlekDeckApps.medium"
+        static let large = "FlekDeckApps.large"
+        static let extraLargePortrait = "FlekDeckApps.extraLargePortrait"
+        static let all = [small, medium, large, extraLargePortrait]
+    }
 
     /// The folder one copy of FlekDeck keeps its list in, inside an app group
     /// container. It is named after the app because a signer can give the same

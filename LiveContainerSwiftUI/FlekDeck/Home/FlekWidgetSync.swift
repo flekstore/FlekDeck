@@ -67,7 +67,14 @@ final class FlekWidgetSync {
             var history = WidgetLaunchHistory.load(from: folder)
             guard history.record(id) else { return }
             history.write(to: folder)
-            WidgetCenter.shared.reloadTimelines(ofKind: WidgetAppList.widgetKind)
+            Self.reloadWidgets()
+        }
+    }
+
+    /// Has every Apps widget look again, whatever its size.
+    private static func reloadWidgets() {
+        for kind in WidgetAppList.Kind.all {
+            WidgetCenter.shared.reloadTimelines(ofKind: kind)
         }
     }
 
@@ -104,7 +111,7 @@ final class FlekWidgetSync {
 
         queue.async { [self] in
             if write(list, icons: icons, to: folder) {
-                WidgetCenter.shared.reloadTimelines(ofKind: WidgetAppList.widgetKind)
+                Self.reloadWidgets()
             }
         }
     }

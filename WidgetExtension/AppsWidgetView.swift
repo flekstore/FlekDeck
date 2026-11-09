@@ -12,7 +12,15 @@ struct AppsWidgetView: View {
 
     var body: some View {
         content
-            .containerBackground(.fill.tertiary, for: .widget)
+            .containerBackground(for: .widget) {
+                // Clear over the home screen's own glass (SystemGlassBackground);
+                // the usual grey should iOS ever stop taking the glass request.
+                if SystemGlassBackground.isInstalled {
+                    Color.clear
+                } else {
+                    Rectangle().fill(.fill.tertiary)
+                }
+            }
     }
 
     @ViewBuilder
