@@ -1,9 +1,11 @@
 # IdevicePairing
 
 `IdevicePairing.dylib` is the part of [idevice](https://github.com/jkcoxson/idevice)
-(MIT) that pairs a device with a host. FlekDeck loads it to create a pairing
-file on the device itself, on iOS 27 and later; see
-`LiveContainerSwiftUI/Utilities/LCDevicePairing.m`.
+(MIT) that FlekDeck calls itself, rather than through StikJIT. It loads it to
+create a pairing file on the device itself, on iOS 27 and later (see
+`LiveContainerSwiftUI/Utilities/LCDevicePairing.m`), and to record the device's
+own log while built-in JIT's check runs, for a report sent to support (see
+`LiveContainerSwiftUI/Utilities/LCDeviceLog.m`).
 
 It holds the functions listed in `exports.txt` and what they need, nothing
 else, and is built for devices only (arm64, iOS 17 and later).

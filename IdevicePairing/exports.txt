@@ -6,3 +6,10 @@ _rp_pairing_file_free
 _idevice_error_free
 _idevice_string_free
 _idevice_data_free
+_rp_pairing_file_read
+_tunnel_create_remotexpc
+_adapter_free
+_rsd_handshake_free
+_syslog_relay_connect_rsd
+_syslog_relay_next
+_syslog_relay_client_free

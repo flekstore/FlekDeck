@@ -3,9 +3,10 @@
 # build.sh — rebuilds IdevicePairing.dylib, which is kept in the repository.
 #
 # The dylib is the part of idevice (https://github.com/jkcoxson/idevice, MIT)
-# that pairs a device with a host: the functions listed in exports.txt and
-# whatever they need, nothing else. FlekDeck uses it to create a pairing file
-# on the device itself, see LCDevicePairing.m.
+# that FlekDeck calls itself: the functions listed in exports.txt and whatever
+# they need, nothing else. FlekDeck uses it to create a pairing file on the
+# device itself, see LCDevicePairing.m, and to record the device's log for a
+# JIT report, see LCDeviceLog.m.
 #
 # It is linked from the static library the StikJIT repository carries, taken
 # at a pinned commit and checked against a pinned hash. That library is 57 MB,

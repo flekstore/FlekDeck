@@ -75,6 +75,7 @@ struct FlekBuiltInJITSection: View {
     /// Setting the VPN up or turning it on, which takes a moment.
     @State private var isVPNBusy = false
     @State private var notice = ""
+    @State private var reportFile: ReportFile?
     @State private var noticeShow = false
 
     var body: some View {
@@ -90,6 +91,9 @@ struct FlekBuiltInJITSection: View {
                 pairingStep
                 vpnStep
                 readinessStep
+                if case .failed = readiness {
+                    reportRow
+                }
                 appsStep
                 // Not a step: the setup is whole without it.
                 if FlekMobileDataShortcut.isOffered {
@@ -115,6 +119,12 @@ struct FlekBuiltInJITSection: View {
                     resetDiskImage()
                 }
                 .disabled(isChecking)
+                if isPremium, pairingFileFound, FlekBuiltInJIT.blocker == nil {
+                    Button("lc.flek.jit.report.title".loc) {
+                        sendReport()
+                    }
+                    .disabled(isChecking)
+                }
             }
             // On the one row that is always here, the steps giving way to a
             // blocker, and for the same reason as the modifiers on the first
@@ -123,6 +133,9 @@ struct FlekBuiltInJITSection: View {
                 Button("lc.common.ok".loc) {}
             } message: {
                 Text(notice)
+            }
+            .sheet(item: $reportFile) { report in
+                ActivityViewController(activityItems: [report.url])
             }
         } header: {
             Text("lc.flek.jit.header".loc)
@@ -705,28 +718,55 @@ struct FlekBuiltInJITSection: View {
     /// Does what a guest's helper does first at launch — reach the device and
     /// mount its developer disk image — but here, where it can be watched, and
     /// with the image left mounted for the launches that follow.
-    private func checkReadiness() {
+    /// - Parameter report: Records the check, and the device's log while it
+    ///   runs, for a report the share sheet is then opened with.
+    private func checkReadiness(report: FlekJITReport? = nil) {
         readiness = .checking(Self.stepText(0, -1))
         Task {
             // FlekDeck's own VPN is turned on for the check as it is for a
             // launch. If it does not come up, the check says so in its own way.
             if vpn.isConfigured {
-                try? await vpn.connect()
+                do {
+                    try await vpn.connect()
+                    report?.note("VPN turned on")
+                } catch {
+                    report?.note("VPN did not turn on: \(error.localizedDescription)")
+                }
             }
             // Over mobile data the device does not answer however the VPN is,
             // and on no connection at all a VPN that is off cannot start. The
             // check would only say that it timed out and ask about the VPN.
-            if !(await FlekBuiltInJIT.isDeviceReachable()), let reason = await connectionReason() {
+            let isReachable = await FlekBuiltInJIT.isDeviceReachable()
+            report?.note(isReachable ? "Device answers through the VPN" : "Device does not answer through the VPN")
+            if !isReachable, let reason = await connectionReason() {
                 readiness = .failed(reason)
                 readyAt = 0
+                if let report {
+                    Self.checkQueue.async {
+                        let file = report.finish(result: reason)
+                        DispatchQueue.main.async { reportFinished(file) }
+                    }
+                }
                 return
             }
             Self.checkQueue.async {
+                if let report {
+                    DispatchQueue.main.async {
+                        readiness = .checking("lc.flek.jit.report.recording".loc)
+                    }
+                    report.startDeviceLog()
+                }
                 let error = LCUtils.prepareBuiltInJIT { stage, fraction in
+                    report?.noteStage(stage, fraction)
                     let step = Self.stepText(stage, fraction)
                     DispatchQueue.main.async {
                         readiness = .checking(step)
                     }
+                }
+                var file: URL?
+                if let report {
+                    let result = (error as NSError?).map { "failed — \($0.localizedDescription) (\($0.domain) \($0.code))" } ?? "passed"
+                    file = report.finish(result: result)
                 }
                 DispatchQueue.main.async {
                     if let error = error as NSError? {
@@ -739,9 +779,56 @@ struct FlekBuiltInJITSection: View {
                         readiness = .ready
                         readyAt = Date().timeIntervalSince1970
                     }
+                    if report != nil {
+                        reportFinished(file)
+                    }
                 }
             }
         }
+    }
+
+    /// Runs the check again for a report, which the share sheet is then opened
+    /// with.
+    private func sendReport() {
+        let vpnState: String
+        if !FlekLoopbackVPN.isAvailable {
+            vpnState = "FlekDeck's VPN not in this copy (another VPN app is used)"
+        } else if !vpn.isConfigured {
+            vpnState = "FlekDeck's VPN not set up"
+        } else {
+            vpnState = "FlekDeck's VPN set up, \(vpn.isOn ? "on" : "off") before the check"
+        }
+        checkReadiness(report: FlekJITReport(vpn: vpnState))
+    }
+
+    private func reportFinished(_ file: URL?) {
+        if let file {
+            reportFile = ReportFile(url: file)
+        } else {
+            show("lc.flek.jit.report.notWritten".loc)
+        }
+    }
+
+    /// A report made, for the share sheet to be opened with.
+    struct ReportFile: Identifiable {
+        let url: URL
+        var id: URL { url }
+    }
+
+    /// Offered under the check once it has failed: what to do when the steps
+    /// to try have not helped.
+    private var reportRow: some View {
+        Button {
+            sendReport()
+        } label: {
+            VStack(alignment: .leading, spacing: 2) {
+                Text("lc.flek.jit.report.title".loc)
+                Text("lc.flek.jit.report.caption".loc)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .disabled(isChecking)
     }
 
     /// Why the device does not answer, where that is down to what it is

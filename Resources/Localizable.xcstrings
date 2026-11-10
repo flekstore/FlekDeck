@@ -18122,6 +18122,50 @@
         }
       }
     },
+    "lc.flek.jit.report.caption" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Checks again and records the iPhone’s log for support."
+          }
+        }
+      }
+    },
+    "lc.flek.jit.report.notWritten" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "The report could not be saved."
+          }
+        }
+      }
+    },
+    "lc.flek.jit.report.recording" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Recording the iPhone’s log…"
+          }
+        }
+      }
+    },
+    "lc.flek.jit.report.title" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Send Report"
+          }
+        }
+      }
+    },
     "lc.flek.jit.resetImage" : {
       "extractionState" : "manual",
       "localizations" : {
