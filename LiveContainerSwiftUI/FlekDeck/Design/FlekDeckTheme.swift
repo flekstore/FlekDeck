@@ -238,6 +238,45 @@ extension View {
     }
 }
 
+/// Keeps the pages under it to a column of readable width on an iPhone Duo opened
+/// out: the inner display is a tablet's width, and a page laid out for a phone
+/// otherwise stretches its rows and tiles across all of it. Folded, and on every
+/// other device, the pages keep the system's own margins.
+///
+/// Through the scroll views' content margins rather than a narrower frame, so a
+/// page's background, its navigation bar and the scrolling itself still span the
+/// whole window, and only what scrolls is held to the column. The modifier is
+/// always there, with the system's margins when the page is narrower than the
+/// column, so folding and unfolding change a number rather than the view, and a
+/// page pushed in Settings stays where it is.
+struct FlekReadableColumn: ViewModifier {
+    /// The column's width: about the width of a page in a form sheet on iPad.
+    static let width: CGFloat = 640
+
+    @State private var available: CGFloat = 0
+
+    func body(content: Content) -> some View {
+        let spare = available - Self.width
+        let margin: CGFloat? = FlekDeviceModel.isDuo && spare > 0 ? spare / 2 : nil
+        if #available(iOS 17.0, *) {
+            content
+                .contentMargins(.horizontal, margin, for: .scrollContent)
+                .background(widthReader)
+        } else {
+            content
+        }
+    }
+
+    @available(iOS 17.0, *)
+    private var widthReader: some View {
+        GeometryReader { proxy in
+            Color.clear
+                .onAppear { available = proxy.size.width }
+                .onChange(of: proxy.size.width) { _, width in available = width }
+        }
+    }
+}
+
 /// Reports the edge the system's vertical bar runs down — nil where it places
 /// none — once on appearing and again whenever the edge changes.
 ///

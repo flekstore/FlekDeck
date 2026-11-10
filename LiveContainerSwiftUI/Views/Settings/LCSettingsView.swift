@@ -757,6 +757,9 @@ struct LCSettingsView: View {
             }
         }
         .navigationViewStyle(StackNavigationViewStyle())
+        // A column, not the whole width, on an iPhone Duo opened out: every page
+        // pushed here is laid out for a phone.
+        .modifier(FlekReadableColumn())
         .onChange(of: sharedModel.deepLink) { link in
             guard sharedModel.selectedTab == .settings, let link else { return }
             sharedModel.deepLink = nil

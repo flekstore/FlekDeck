@@ -45,12 +45,15 @@ struct FlekPersonalizationView: View {
 
                     HStack(alignment: .top, spacing: 8) {
                         currentPreview
-                        VStack(spacing: 8) {
-                            actionTile(title: "lc.flek.chooseFromCollection".loc, systemImage: "rectangle.grid.3x2.fill") {
-                                showCollection = true
-                            }
-                            actionTile(title: "lc.flek.chooseFromPhotos".loc, systemImage: FlekSymbol.addPhoto) {
-                                showPhotoPicker = true
+                        // One over the other where there is a phone's width for them.
+                        // Side by side where there is far more, on an iPhone Duo opened
+                        // out, like the Grid and List tiles below: stacked there, each
+                        // was a wide, low bar with its icon and label lost in the middle.
+                        GeometryReader { proxy in
+                            if proxy.size.width > Self.sideBySideWidth {
+                                HStack(spacing: 8) { wallpaperActions(large: true) }
+                            } else {
+                                VStack(spacing: 8) { wallpaperActions(large: false) }
                             }
                         }
                         .frame(height: 226)
@@ -259,16 +262,32 @@ struct FlekPersonalizationView: View {
         }
     }
 
-    private func actionTile(title: String, systemImage: String, action: @escaping () -> Void) -> some View {
+    @ViewBuilder
+    private func wallpaperActions(large: Bool) -> some View {
+        actionTile(title: "lc.flek.chooseFromCollection".loc, systemImage: "rectangle.grid.3x2.fill", large: large) {
+            showCollection = true
+        }
+        actionTile(title: "lc.flek.chooseFromPhotos".loc, systemImage: FlekSymbol.addPhoto, large: large) {
+            showPhotoPicker = true
+        }
+    }
+
+    /// Wider than this, the two action tiles stand side by side rather than one
+    /// over the other. A phone leaves them about 200pt, a Pro Max about 260.
+    private static let sideBySideWidth: CGFloat = 300
+
+    private func actionTile(title: String, systemImage: String, large: Bool,
+                            action: @escaping () -> Void) -> some View {
         Button(action: action) {
-            VStack(spacing: 16) {
-                Image(systemName: systemImage).font(.system(size: 28))
+            VStack(spacing: large ? 20 : 16) {
+                Image(systemName: systemImage).font(.system(size: large ? 40 : 28))
                 Text(title).font(.system(size: 14)).multilineTextAlignment(.center)
             }
             .foregroundStyle(Self.flekBlue)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .padding(.horizontal, 24)
+            .padding(.horizontal, large ? 16 : 24)
             .background(RoundedRectangle(cornerRadius: 20, style: .continuous).fill(Self.tileFill))
+            .contentShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
         }
         .buttonStyle(.plain)
     }
