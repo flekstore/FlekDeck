@@ -282,6 +282,8 @@ class AppInfoProvider {
     /// Where a run of swipes along the bar's app button stands. See
     /// `quickSwitchBegan`.
     private let quickSwitch = MultitaskQuickSwitch()
+    /// See `barMenuTextWidth`.
+    private var barMenuTextWidths: [String: CGFloat] = [:]
 
     /// Two apps side by side, one on each side of an iPhone Duo's fold, or one app
     /// and the apps to choose the second from. Kept while the screen is turned or
@@ -339,11 +341,11 @@ class AppInfoProvider {
     var splitOpenHomeItem: ((FlekHomeItem) -> Void)?
     /// Set by the home screen: its items, in its order.
     var splitHomeItems: (() -> [FlekHomeItem])?
-    /// The app a swipe along the bar is landing on, which the bar's app button
-    /// names from the moment the finger lets go rather than once the window has
-    /// settled, and which way the swipe went, for the name to go the same way.
+    /// The app a swipe along the bar is landing on, whose width the bar's app
+    /// button takes from the moment the finger lets go rather than once the
+    /// window has settled. Its name is on the way in by then, moving with the
+    /// windows (see `MultitaskQuickSwitch.ButtonSlide`).
     @Published private(set) var quickSwitchLanding: String?
-    @Published private(set) var quickSwitchLandingSide: CGFloat?
     @Published var isAppSwitcherOpen: Bool = false
     /// Whether the bar's app button reads Close all, as the switcher's chin does in
     /// its place: on as the switcher opens, off as it closes back to an app or the
@@ -1040,32 +1042,45 @@ class AppInfoProvider {
     /// which keeps the capsule recognisably the same control as the one the
     /// switcher puts in its place.
     public var barMenuWidth: CGFloat {
-        let name = frontmostAppName()
-        let textWidth = (name as NSString).size(withAttributes: [
-            .font: UIFont.systemFont(ofSize: 14, weight: .medium)
-        ]).width
+        barMenuWidth(forName: frontmostAppName())
+    }
+
+    /// The capsule's width naming the app called `name`.
+    func barMenuWidth(forName name: String) -> CGFloat {
         // Padding + icon + gap + name + gap + chevron + padding, matching the
         // label's own layout.
         let content = Constants.barMenuHPadding * 2
             + Constants.barMenuIconSize
             + Constants.barMenuSpacing * 2
-            + ceil(textWidth)
+            + barMenuTextWidth(name)
             + Constants.barMenuChevronWidth
         let ideal = min(max(content, Constants.barMenuBaseWidth), Constants.barMenuMaxWidth)
         return min(ideal, barMenuBudget)
     }
 
     /// What the icon and name take of `barMenuWidth`: their own width, or the
-    /// room left beside the padding and the chevron, whichever is less. Held to
-    /// it, a name leaving on a switch does not keep its room while it goes.
+    /// room left beside the padding and the chevron, whichever is less.
     public var barMenuNameWidth: CGFloat {
-        let textWidth = (frontmostAppName() as NSString).size(withAttributes: [
-            .font: UIFont.systemFont(ofSize: 14, weight: .medium)
-        ]).width
-        let own = Constants.barMenuIconSize + Constants.barMenuSpacing + ceil(textWidth)
-        let room = barMenuWidth - Constants.barMenuHPadding * 2
+        barMenuNameWidth(forName: frontmostAppName())
+    }
+
+    /// The same for the app called `name`.
+    func barMenuNameWidth(forName name: String) -> CGFloat {
+        let own = Constants.barMenuIconSize + Constants.barMenuSpacing + barMenuTextWidth(name)
+        let room = barMenuWidth(forName: name) - Constants.barMenuHPadding * 2
             - Constants.barMenuSpacing - Constants.barMenuChevronWidth
         return max(0, min(own, room))
+    }
+
+    /// A name's width on the app button, measured once: a swipe along the bar
+    /// asks for two of them every frame.
+    private func barMenuTextWidth(_ name: String) -> CGFloat {
+        if let width = barMenuTextWidths[name] { return width }
+        let width = ceil((name as NSString).size(withAttributes: [
+            .font: UIFont.systemFont(ofSize: 14, weight: .medium)
+        ]).width)
+        barMenuTextWidths[name] = width
+        return width
     }
 
     /// The visible solid strip of the bar (below the concave corners). Floored to
@@ -1564,6 +1579,10 @@ class AppInfoProvider {
         return apps.last?.appName ?? "App"
     }
 
+    /// The running app `uuid` names, if it is still running.
+    func dockApp(_ uuid: String) -> DockAppModel? {
+        apps.first { $0.appUUID == uuid }
+    }
     
     override init() {
         super.init()
@@ -5337,7 +5356,8 @@ struct SwitcherBarContentView: View {
             .accessibilityLabel("Hide Switcher Bar")
 
             BarControlButton(action: toggleAppSwitcher) {
-                FrontmostAppIcon(size: FlekTheme.sideBarButtonIconSize)
+                FrontmostAppIcon(slide: dockManager.quickSwitchButtonSlide,
+                                 size: FlekTheme.sideBarButtonIconSize)
                     .frame(width: size, height: size)
                     .stableBarGlass(capsule: false)
                     .frame(width: width)
@@ -5426,7 +5446,8 @@ struct SwitcherBarContentView: View {
 @available(iOS 16.0, *)
 private struct FrontmostAppIcon: View {
     @EnvironmentObject var dockManager: MultitaskDockManager
-    @Environment(\.layoutDirection) private var layoutDirection
+    /// Where a swipe along the button has the windows, which the icons follow.
+    @ObservedObject var slide: MultitaskQuickSwitch.ButtonSlide
     let size: CGFloat
 
     private var frontmostApp: DockAppModel? {
@@ -5442,15 +5463,25 @@ private struct FrontmostAppIcon: View {
     }
 
     var body: some View {
-        // One icon per app, so a switch along the bar carries this one out
-        // through the icon's outline the way its window went, and the next in.
+        let position = slide.position
+        // One icon per app, so a swipe along the bar carries this one out
+        // through the icon's outline the way its window goes, and the next one
+        // in, step for step with the windows.
+        let pages = position?.pages(gap: size / 4) { _ in size }
+            ?? [.init(id: frontmostApp?.appUUID ?? "", x: 0)]
         ZStack {
-            icon(for: frontmostApp)
-                .id(frontmostApp?.appUUID)
-                .transition(dockManager.barAppTransition(layoutDirection))
+            ForEach(pages) { page in
+                icon(for: position == nil ? frontmostApp : dockManager.dockApp(page.id))
+                    .offset(x: page.x)
+                    .transition(.opacity)
+                    // Where the windows put them, never eased there.
+                    .transaction { if position != nil { $0.animation = nil } }
+            }
         }
         .frame(width: size, height: size)
         .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
+        // The swipe's right is the screen's right, whatever the language.
+        .environment(\.layoutDirection, .leftToRight)
     }
 
     @ViewBuilder
@@ -5474,6 +5505,8 @@ private struct FrontmostAppIcon: View {
 @available(iOS 16.0, *)
 struct FrontmostAppIconLabel: View {
     @EnvironmentObject var dockManager: MultitaskDockManager
+    /// Where a swipe along the button has the windows, which the label follows.
+    @ObservedObject var slide: MultitaskQuickSwitch.ButtonSlide
     @Environment(\.layoutDirection) private var layoutDirection
 
     private var frontmostApp: DockAppModel? {
@@ -5483,19 +5516,66 @@ struct FrontmostAppIconLabel: View {
         return dockManager.apps.last
     }
 
+    /// One app's icon, name and chevron, laid out as the button lays them out
+    /// with that app in front, and where it stands across the button.
+    private struct Page: Identifiable {
+        let id: String
+        let app: DockAppModel?
+        let nameWidth: CGFloat
+        let width: CGFloat
+        let x: CGFloat
+    }
+
+    private func pages(_ position: MultitaskQuickSwitch.ButtonSlide.Position?) -> [Page] {
+        guard let position else {
+            let app = frontmostApp
+            return [Page(id: app?.appUUID ?? "", app: app, nameWidth: dockManager.barMenuNameWidth,
+                         width: dockManager.barMenuWidth, x: 0)]
+        }
+        let name = { (uuid: String) in dockManager.dockApp(uuid)?.appName ?? "App" }
+        return position.pages(gap: 0) { dockManager.barMenuWidth(forName: name($0)) }.map { page in
+            Page(id: page.id, app: dockManager.dockApp(page.id),
+                 nameWidth: dockManager.barMenuNameWidth(forName: name(page.id)),
+                 width: dockManager.barMenuWidth(forName: name(page.id)), x: page.x)
+        }
+    }
+
+    var body: some View {
+        let sliding = slide.position != nil
+        // At rest, the app in front's page. During a swipe along the bar, the
+        // incoming app's beside it as well, as their windows are, and the two
+        // move as the windows move: the finger's, then the slide the rest of the
+        // way. Each centred on the capsule, whose centre stays put as it takes
+        // the incoming app's width, and cut off only by it (see
+        // `BarAppButtonLabel`), so they come and go at its very edges.
+        ZStack {
+            ForEach(pages(slide.position)) { page in
+                BarAppButtonPage(app: page.app, nameWidth: page.nameWidth)
+                    .frame(width: page.width)
+                    .environment(\.layoutDirection, layoutDirection)
+                    .offset(x: page.x)
+                    .transition(.opacity)
+                    // Where the windows put them, never eased there: not by the
+                    // capsule's own glide to the incoming app's width either.
+                    .transaction { if sliding { $0.animation = nil } }
+            }
+        }
+        // The swipe's right is the screen's right, whatever the language.
+        .environment(\.layoutDirection, .leftToRight)
+    }
+}
+
+/// One app's side of the bar's app button: its icon and name, then the chevron.
+@available(iOS 16.0, *)
+private struct BarAppButtonPage: View {
+    let app: DockAppModel?
+    /// What the icon and name take of it (see `barMenuNameWidth`).
+    let nameWidth: CGFloat
+
     var body: some View {
         HStack(spacing: MultitaskDockManager.Constants.barMenuSpacing) {
-            // Icon and name as one per app, so a switch along the bar carries this
-            // app's out the way its window went and the next one's in. Held to the
-            // incoming app's width rather than sized by both, so nothing shifts
-            // once the outgoing one has gone; it is cut off at the edges as it goes.
-            ZStack {
-                AppIconAndName(app: frontmostApp)
-                    .id(frontmostApp?.appUUID)
-                    .transition(dockManager.barAppTransition(layoutDirection))
-            }
-            .frame(width: dockManager.barMenuNameWidth)
-            .clipped()
+            AppIconAndName(app: app)
+                .frame(width: nameWidth)
 
             Image(systemName: "chevron.up")
                 .foregroundColor(Color.barGlyph.opacity(0.6))
@@ -5525,7 +5605,7 @@ private struct BarAppButtonLabel: View {
                 CloseAllLabel(bounce: closeBounce)
                     .transition(Self.swap)
             } else {
-                FrontmostAppIconLabel()
+                FrontmostAppIconLabel(slide: dockManager.quickSwitchButtonSlide)
                     .transition(Self.swap)
             }
         }
@@ -8283,6 +8363,56 @@ final class MultitaskQuickSwitch {
     var springboardImage: UIImage?
     var springboardImageSize: CGSize = .zero
     var springboardImageWork: DispatchWorkItem?
+    /// What the app button shows while the windows move.
+    let buttonSlide = ButtonSlide()
+    /// Reads the window in front off the screen each frame while a swipe let go
+    /// of slides the rest of the way, for the button to keep with it.
+    var buttonSlideLink: CADisplayLink?
+
+    /// The app button's content during a swipe along it: the app in front and
+    /// the one coming in, side by side as their windows are and moving as they
+    /// move, so the button names the incoming app as it comes rather than once
+    /// it has landed. Its own object, watched by the button's label alone, so
+    /// following the finger redraws that and nothing else.
+    final class ButtonSlide: ObservableObject {
+        struct Position: Equatable {
+            /// The app in front as the swipe found it.
+            var current: String
+            /// The app coming in, if there is one that way, and the side it
+            /// comes from: 1 from the left, as the windows go right, -1 from
+            /// the right.
+            var incoming: String?
+            var side: CGFloat
+            /// How far the window in front has gone along the bar, as a share of
+            /// the way: 1 or -1 once the incoming one has the screen. Signed as
+            /// the finger moves, to the right positive.
+            var progress: CGFloat
+
+            struct Page: Identifiable {
+                let id: String
+                /// From the button's centre to the page's, to the right.
+                let x: CGFloat
+            }
+
+            /// Each app's place across the button, given each one's width and
+            /// the space kept between two. A page's width apart, centre to
+            /// centre, as the windows are a screen's: the incoming one stands
+            /// just off the button's edge as the swipe starts, and where the
+            /// one in front stood once it has landed.
+            func pages(gap: CGFloat, width: (String) -> CGFloat) -> [Page] {
+                let own = width(current)
+                guard let incoming, incoming != current else {
+                    return [Page(id: current, x: progress * (own + gap))]
+                }
+                let travel = (own + width(incoming)) / 2 + gap
+                let x = progress * travel
+                return [Page(id: current, x: x), Page(id: incoming, x: x - side * travel)]
+            }
+        }
+
+        /// Nil at rest, when the button names the app in front alone.
+        @Published var position: Position?
+    }
 
     /// The springboard under the windows, blurred and dimmed the way the switcher
     /// shows it, standing in for the black behind them and for the windows
@@ -8410,6 +8540,7 @@ final class MultitaskQuickSwitch {
 
     final class Drag {
         let current: UIView
+        let currentUUID: String
         /// Along the bar, in the windows' coordinates: which way, and how far a
         /// window travels that way to clear the screen.
         let axis: CGVector
@@ -8454,9 +8585,10 @@ final class MultitaskQuickSwitch {
         var targetPartnerCorners: Corners?
         var targetPair: MultitaskDockManager.SplitPair?
 
-        init(current: UIView, axis: CGVector, extent: CGFloat,
+        init(current: UIView, currentUUID: String, axis: CGVector, extent: CGFloat,
              currentCorners: Corners) {
             self.current = current
+            self.currentUUID = currentUUID
             self.axis = axis
             self.extent = extent
             self.currentCorners = currentCorners
@@ -8565,7 +8697,7 @@ extension MultitaskDockManager {
         // Shaped like the screen from the first moment of the swipe until the
         // window is back at rest, as iOS shows an app being swiped; beside
         // another, like its side of it.
-        let drag = MultitaskQuickSwitch.Drag(current: current, axis: axis, extent: extent,
+        let drag = MultitaskQuickSwitch.Drag(current: current, currentUUID: uuid, axis: axis, extent: extent,
                                              currentCorners: .clip(current.layer, shape: quickSwitchShape(of: current)))
         drag.caughtLanding = caughtLanding && caught === current
         if let pair = pairOnScreen, let partner {
@@ -8603,14 +8735,61 @@ extension MultitaskDockManager {
         let position = drag.origin + translation
         let side: CGFloat = position > 0 ? 1 : (position < 0 ? -1 : drag.side)
         if side != drag.side { bringOutQuickSwitchTarget(on: side, for: drag) }
+        let offset: CGFloat
         if drag.target != nil {
+            offset = position
             placeCurrent(of: drag, at: position)
             placeTarget(of: drag, at: position - side * drag.spacing)
         } else {
             // No app that way: the window only gives a little, as a scroll view
             // does pulled past its end.
-            placeCurrent(of: drag, at: Self.quickSwitchRubberBand(position, extent: drag.extent))
+            offset = Self.quickSwitchRubberBand(position, extent: drag.extent)
+            placeCurrent(of: drag, at: offset)
         }
+        slideQuickSwitchButton(of: drag, windowAt: offset)
+    }
+
+    /// The app button's label, kept with the window in front, `offset` along the
+    /// bar from its place: the app's own page going the way the window goes,
+    /// and the incoming app's, if any, following it in from the other side.
+    private func slideQuickSwitchButton(of drag: MultitaskQuickSwitch.Drag, windowAt offset: CGFloat) {
+        let position = MultitaskQuickSwitch.ButtonSlide.Position(
+            current: drag.currentUUID, incoming: drag.targetUUID, side: drag.side,
+            progress: offset / max(drag.spacing, 1))
+        let slide = quickSwitch.buttonSlide
+        if slide.position != position { slide.position = position }
+    }
+
+    /// The label for the app button and the side column's icon to follow.
+    var quickSwitchButtonSlide: MultitaskQuickSwitch.ButtonSlide { quickSwitch.buttonSlide }
+
+    /// Keeps the app button's label with the windows while a swipe let go of
+    /// slides them the rest of the way. Core Animation moves them then, out of
+    /// SwiftUI's sight, so the window in front is read off the screen each frame.
+    private func followQuickSwitchSettle() {
+        let run = quickSwitch
+        guard run.buttonSlideLink == nil else { return }
+        let link = CADisplayLink(target: self, selector: #selector(quickSwitchSettleFrame))
+        // As often as the windows are drawn, on a ProMotion screen too.
+        link.preferredFrameRateRange = CAFrameRateRange(minimum: 60, maximum: 120, preferred: 120)
+        link.add(to: .main, forMode: .common)
+        run.buttonSlideLink = link
+    }
+
+    private func stopFollowingQuickSwitchSettle() {
+        quickSwitch.buttonSlideLink?.invalidate()
+        quickSwitch.buttonSlideLink = nil
+    }
+
+    @objc private func quickSwitchSettleFrame() {
+        guard let settle = quickSwitch.settling else {
+            stopFollowingQuickSwitchSettle()
+            return
+        }
+        let drag = settle.drag
+        // Where the window is on screen this frame, not where it is headed.
+        guard let shown = drag.current.layer.presentation()?.affineTransform() else { return }
+        slideQuickSwitchButton(of: drag, windowAt: shown.tx * drag.axis.dx + shown.ty * drag.axis.dy)
     }
 
     /// The window in front, and the app beside it where two share the screen.
@@ -8645,13 +8824,9 @@ extension MultitaskDockManager {
         }
         let settle = MultitaskQuickSwitch.Settle(drag: drag, landing: (target, uuid))
         quickSwitch.settling = settle
-        // The bar's app button names the incoming app now, carried in after the
-        // windows. Which way first and the app a turn later: SwiftUI sends the
-        // outgoing name off with the transition it was last drawn with.
-        quickSwitchLandingSide = drag.side
-        DispatchQueue.main.async {
-            withAnimation(Self.quickSwitchLabelAnimation) { self.quickSwitchLanding = uuid }
-        }
+        // The bar's app button takes the incoming app's width now, gliding to
+        // it (see `BarAppButtonLabel`); the app's name is already on its way in.
+        quickSwitchLanding = uuid
         // Carries on at the finger's speed and eases to a stop.
         let remaining = max(drag.spacing - abs(position), 1)
         UIView.animate(withDuration: 0.4, delay: 0, usingSpringWithDamping: 1,
@@ -8665,6 +8840,7 @@ extension MultitaskDockManager {
             guard self.quickSwitch.settling === settle else { return }
             self.finishQuickSwitch(settle, caught: false)
         }
+        followQuickSwitchSettle()
     }
 
     /// The shape `view` has at rest, which it keeps for the whole swipe: the
@@ -8814,6 +8990,7 @@ extension MultitaskDockManager {
             guard self.quickSwitch.settling === settle else { return }
             self.finishQuickSwitch(settle, caught: false)
         }
+        followQuickSwitchSettle()
     }
 
     /// Stops a settling swipe's windows where they have got to and does now what
@@ -8839,12 +9016,16 @@ extension MultitaskDockManager {
     /// switcher does from here, minus the entrance, which the swipe was.
     private func finishQuickSwitch(_ settle: MultitaskQuickSwitch.Settle, caught: Bool) {
         quickSwitch.settling = nil
+        stopFollowingQuickSwitchSettle()
         let drag = settle.drag
         guard let (target, uuid) = settle.landing else {
             // Back where it was, and the window brought out goes back to how it was.
             drag.currentCorners.restore(drag.current.layer)
             if let partner = drag.currentPartner { drag.currentPartnerCorners?.restore(partner.layer) }
             putBackQuickSwitchTarget(of: drag)
+            // The app button names the app in front alone again. Caught, the
+            // next swipe has it moving again before it is drawn.
+            quickSwitch.buttonSlide.position = nil
             // Two back side by side: the divider and the handles come back.
             if drag.currentPartner != nil { syncSplitChrome() }
             guard !caught else { return }
@@ -8871,10 +9052,10 @@ extension MultitaskDockManager {
         quickSwitch.springboard?.fadedWindows.removeAll { $0.view === target || $0.view === partner }
         if !caught { hideBlurredSpringboard() }
         // Closed while it was coming in: nothing to hand the stage to, and the
-        // button goes back to naming the app in front.
+        // button goes back to naming the app in front, gliding back to its width.
         guard apps.contains(where: { $0.appUUID == uuid }) else {
-            withAnimation(Self.quickSwitchLabelAnimation) { quickSwitchLanding = nil }
-            quickSwitchLandingSide = nil
+            quickSwitchLanding = nil
+            quickSwitch.buttonSlide.position = nil
             if drag.currentPartner != nil { syncSplitChrome() }
             return
         }
@@ -8902,9 +9083,10 @@ extension MultitaskDockManager {
         if !caught, partner == nil { keepOneAppOnStage(target) }
         if let window = keyWindow { bringViewToFront(target, in: window) }
         windowTookStage(uuid: uuid)
-        // Named since the finger let go; from here as the app in front.
+        // Its width taken since the finger let go, and its page slid all the
+        // way across: from here the button shows it as the app in front.
         quickSwitchLanding = nil
-        quickSwitchLandingSide = nil
+        quickSwitch.buttonSlide.position = nil
         // The divider and the handles, now that the windows are at rest.
         syncSplitChrome()
 
@@ -8938,20 +9120,6 @@ extension MultitaskDockManager {
     @objc func quickSwitchWindowTouched() {
         quickSwitch.isLive = false
     }
-
-    /// How the bar's app button changes apps. When a swipe lands, along the bar
-    /// after the windows: in from the side the incoming window came from, out
-    /// the side the outgoing one left by. Otherwise a cross-fade, where the
-    /// change is animated at all.
-    func barAppTransition(_ layoutDirection: LayoutDirection) -> AnyTransition {
-        guard let side = quickSwitchLandingSide else { return .opacity }
-        // To the right the windows went right, so the incoming app came from the left.
-        let fromLeft = side > 0
-        return .push(from: fromLeft == (layoutDirection == .leftToRight) ? .leading : .trailing)
-    }
-
-    /// Close to the window's own landing, so the name arrives with it.
-    private static let quickSwitchLabelAnimation = Animation.spring(response: 0.4, dampingFraction: 1)
 
     /// Keeps the blurred springboard ready for the next swipe. The springboard
     /// only changes while it is in view: covered, it is drawn once, a moment
