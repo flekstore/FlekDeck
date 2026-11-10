@@ -444,6 +444,7 @@ static void LCRecoverLegacyStagedCopies(NSURL *appGroupLC, NSURL *docURL) {
 @property(nonatomic) LCGuestCaptureNotice *captureNotice;
 /// Registration on the guest's report of where its own side bar sits.
 @property(nonatomic) NSNumber *sideBarToken;
+@property(nonatomic) NSNumber *touchToken;
 @end
 
 /// The device orientation to hand a guest, derived from the orientation UIKit has
@@ -820,6 +821,7 @@ static UIDeviceOrientation LCDeviceOrientationForInterface(UIInterfaceOrientatio
     [self beginObservingGuestPiPRequests];
     [self beginObservingGuestCaptureRefusals];
     [self beginObservingGuestSideBar];
+    [self beginObservingGuestTouches];
 
     if([self.delegate respondsToSelector:@selector(appSceneVCDidPresentScene:)]) {
         [self.delegate appSceneVCDidPresentScene:self];
@@ -980,6 +982,7 @@ static UIDeviceOrientation LCDeviceOrientationForInterface(UIInterfaceOrientatio
     [_audio invalidate];
     [self endObservingGuestPiPRequests];
     [self endObservingGuestSideBar];
+    [self endObservingGuestTouches];
     [_captureNotice invalidate];
     _captureNotice = nil;
 
@@ -1126,6 +1129,27 @@ static UIDeviceOrientation LCDeviceOrientationForInterface(UIInterfaceOrientatio
 
 - (void)guestSideBarChanged:(uint64_t)state {
     [MultitaskDockManager.shared setGuestSideBar:state forAppUUID:self.dataUUID];
+}
+
+/// Listens for the guest's word that it has been touched: with two apps side by
+/// side on an iPhone Duo, that makes it the one in use. Its touches go to it
+/// straight, so the host has no other way to know. See LCGuestSideBar.m.
+- (void)beginObservingGuestTouches {
+    if(self.touchToken) return;
+    if(@available(iOS 27.1, *)) {} else return;
+    NSString *name = [NSString stringWithFormat:@"com.kdt.livecontainer.touch.%@", self.dataUUID];
+    NSString *dataUUID = self.dataUUID;
+    int token = 0;
+    if(notify_register_dispatch(name.UTF8String, &token, dispatch_get_main_queue(), ^(int t) {
+        [MultitaskDockManager.shared guestTouched:dataUUID];
+    }) != NOTIFY_STATUS_OK) return;
+    self.touchToken = @(token);
+}
+
+- (void)endObservingGuestTouches {
+    if(!self.touchToken) return;
+    notify_cancel(self.touchToken.intValue);
+    self.touchToken = nil;
 }
 
 - (void)endObservingGuestSideBar {

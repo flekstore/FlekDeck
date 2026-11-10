@@ -59,6 +59,13 @@ enum LCMinimizeToIconAnimator {
     /// arriving. A closing window hands over to the real icon here.
     private static let arrivalProgress: CGFloat = 0.995
 
+    /// How far through a window's way in it counts as arrived for what waits on
+    /// it: the divider between two side by side starts to come in here. At the
+    /// end of the spring, half a second, it came in well after the windows had
+    /// visibly landed, and at the moment they were all but full size, 0.35s,
+    /// ahead of them.
+    private static let arrivalShare: Double = 0.8
+
     /// A critically damped spring, described by its angular frequency.
     ///
     /// Critical damping (ζ = 1) is the point of the choice: stiffness = ω²,
@@ -264,6 +271,62 @@ enum LCMinimizeToIconAnimator {
     /// still for the length of one: see `holdsGeometry(of:)`.
     private static var closings: Set<Int> = []
 
+    /// The windows growing out of an icon or a card that have yet to arrive.
+    /// Held weakly, so a window closed in the air is not counted as on its way for
+    /// ever, nor one that later takes its address.
+    private static let arriving = NSHashTable<UIView>.weakObjects()
+
+    /// Whether `view` is growing out of an icon or a card and has yet to land,
+    /// its flight finished. What the multitask dock draws around two windows side
+    /// by side, the divider between them, waits for that: shown as they set off,
+    /// it stood at the fold on its own before they got there.
+    static func isArriving(_ view: UIView) -> Bool {
+        arriving.contains(view)
+    }
+
+    /// The windows whose flight into an icon has set off: moving, not waiting
+    /// for the dock to say where their icons are. Held weakly, as `arriving` is.
+    private static let departed = NSHashTable<UIView>.weakObjects()
+
+    /// Whether `view` is flying into an icon. The divider between two side by
+    /// side goes as they start to move: left up, it was the one thing still at
+    /// the fold as the two flew home, and taken away as soon as they were sent,
+    /// it went while they still stood waiting for the dock.
+    static func isLeaving(_ view: UIView) -> Bool {
+        departed.contains(view)
+    }
+
+    private static func setDeparted(_ view: UIView, _ isDeparted: Bool) {
+        guard departed.contains(view) != isDeparted else { return }
+        if isDeparted {
+            departed.add(view)
+            // Told at once, so what is drawn around the window starts to go in
+            // the frame the window starts to move: a frame later, it stood on
+            // over windows already shrinking fast.
+            if #available(iOS 16.0, *) { MultitaskDockManager.shared.windowDidDepart() }
+        } else {
+            departed.remove(view)
+            travelDidChange()
+        }
+    }
+
+    private static func setArriving(_ view: UIView, _ isArriving: Bool) {
+        guard arriving.contains(view) != isArriving else { return }
+        if isArriving {
+            arriving.add(view)
+        } else {
+            arriving.remove(view)
+        }
+        travelDidChange()
+    }
+
+    /// A window set off, or arrived: the multitask dock checks what it draws
+    /// around the windows.
+    private static func travelDidChange() {
+        guard #available(iOS 16.0, *) else { return }
+        MultitaskDockManager.shared.windowTravelDidChange()
+    }
+
     /// Whether `view` is on its way into an icon, and so has to be left where it
     /// stands until it lands. The flight is aimed from where the window set off,
     /// and a window moved under it carries its landing with it, off its icon by as
@@ -297,11 +360,15 @@ enum LCMinimizeToIconAnimator {
 
         let token = beginOperation(on: view)
         closings.insert(token)
+        // No longer arriving if it was still on its way in. Leaving once it moves.
+        setArriving(view, false)
         let finish = {
             // Free to be re-framed again, whichever way the flight ended: the
             // window has landed and is about to be hidden, or something newer has
             // it.
             closings.remove(token)
+            if isCurrentOperation(token, on: view) { setDeparted(view, false) }
+            travelDidChange()
             // Something may have brought the window back while it was still on its
             // way out. A newer operation on the same view owns it now, and hiding
             // it here would take away a window the user has just asked for — as
@@ -320,6 +387,7 @@ enum LCMinimizeToIconAnimator {
         }
 
         if prefersDissolve {
+            setDeparted(view, true)
             dissolve(view, completion: finish)
         } else {
             flyWhenTargetIsReady(view, in: container, toItemID: itemID, intoHomeDock: true,
@@ -419,15 +487,27 @@ enum LCMinimizeToIconAnimator {
         view.isHidden = false
 
         let token = beginOperation(on: view)
+        // Reopened on its way out: coming back now, until it has landed.
+        setDeparted(view, false)
+        setArriving(view, true)
         let finish = {
             // A window minimized while it was still opening belongs to that
             // newer operation; putting it back to full size here would undo it.
             guard isCurrentOperation(token, on: view) else { return }
             endOperation(token, on: view)
+            setArriving(view, false)
 
             view.transform = .identity
             view.alpha = 1
             completion?()
+        }
+
+        // Counted as arrived a little before the way in is wholly done (see
+        // `arrivalShare`); the end itself only makes sure.
+        func arrives(after duration: TimeInterval) {
+            DispatchQueue.main.asyncAfter(deadline: .now() + duration * arrivalShare) {
+                if isCurrentOperation(token, on: view) { setArriving(view, false) }
+            }
         }
 
         if prefersDissolve {
@@ -437,6 +517,7 @@ enum LCMinimizeToIconAnimator {
             }
             fade.addCompletion { _ in finish() }
             fade.startAnimation()
+            arrives(after: dissolveDuration)
             return
         }
 
@@ -511,6 +592,7 @@ enum LCMinimizeToIconAnimator {
         beginFlight()
         flight.startAnimation()
         windowFade?.startAnimation()
+        arrives(after: settling)
     }
 
     /// An icon-sized source around a point, for a caller that knows where a window
@@ -679,6 +761,9 @@ enum LCMinimizeToIconAnimator {
         }
         progressWatchers[key] = watcher
 
+        // On its way now, the dock having said where to: what is drawn around the
+        // window goes with it from here.
+        if isCurrent() { setDeparted(view, true) }
         beginFlight()
         flight.startAnimation()
         windowFade?.startAnimation()
@@ -1036,7 +1121,7 @@ enum LCMinimizeToIconAnimator {
                                       in container: UIView) -> Destination {
         if let sourceInWindow, let frame = onScreenFrame(sourceInWindow, in: container) {
             if #available(iOS 16.0, *), let itemID,
-               MultitaskDockManager.shared.homeDockIconFrames[itemID] == sourceInWindow {
+               MultitaskDockManager.shared.isHomeDockIcon(sourceInWindow, forItemID: itemID) {
                 return .dockIcon(frame)
             }
             return .card(frame)

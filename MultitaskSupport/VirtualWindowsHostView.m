@@ -102,6 +102,13 @@ static void *kBackdropObservationContext = &kBackdropObservationContext;
         return;
     }
     [self updateBackdropVisibility];
+    // A window put away or brought back may be one of two side by side.
+    [MultitaskDockManager.shared windowVisibilityDidChange];
+}
+
+- (void)setSplitWindows:(NSArray<UIView *> *)splitWindows {
+    _splitWindows = [splitWindows copy];
+    [self updateBackdropVisibility];
 }
 
 - (void)setBackdropSuspended:(BOOL)backdropSuspended {
@@ -129,7 +136,20 @@ static void *kBackdropObservationContext = &kBackdropObservationContext;
             break;
         }
     }
-    if(frontmostWindow) [self placeBackdropUnder:frontmostWindow];
+    // Two side by side are both in front: under whichever of them is lower.
+    UIView *anchor = frontmostWindow;
+    if(frontmostWindow && [_splitWindows containsObject:frontmostWindow]) {
+        NSUInteger lowest = [self.subviews indexOfObjectIdenticalTo:frontmostWindow];
+        for(UIView *window in _splitWindows) {
+            if(window.hidden || window.superview != self) continue;
+            NSUInteger index = [self.subviews indexOfObjectIdenticalTo:window];
+            if(index < lowest) {
+                lowest = index;
+                anchor = window;
+            }
+        }
+    }
+    if(anchor) [self placeBackdropUnder:anchor];
     _backdropView.hidden = !frontmostWindow;
 }
 
@@ -223,6 +243,9 @@ static BOOL LCRotationIsLocked(void) {
     BOOL locked = LCRotationIsLocked();
     if(!locked && CGRectEqualToRect(self.bounds, _lastLaidOutBounds)) return;
     if(!locked) _lastLaidOutBounds = self.bounds;
+    // First, so that two apps side by side are known to still be side by side —
+    // or not, folded onto the cover display — when each guest is re-framed below.
+    if(!locked) [MultitaskDockManager.shared windowHostDidResize];
     for(UIView *subview in self.subviews) {
         if(subview == _backdropView) continue;
         DecoratedAppSceneViewController *decoratedVC = (id)subview._viewDelegate;
@@ -267,6 +290,10 @@ static BOOL LCRotationIsLocked(void) {
         // in a gap beside it, on the backdrop, is not.
         if(hitView && hitView != _backdropView && event.type == UIEventTypeTouches) {
             [MultitaskDockManager.shared quickSwitchWindowTouched];
+            // And of two apps side by side, the one touched is the one in use.
+            UIView *window = hitView;
+            while(window.superview && window.superview != self) window = window.superview;
+            if(window.superview == self) [MultitaskDockManager.shared windowTouched:window];
         }
         return hitView;
     }

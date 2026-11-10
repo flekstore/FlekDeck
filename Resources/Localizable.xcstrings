@@ -19189,6 +19189,17 @@
         }
       }
     },
+    "lc.flek.openInSplitView" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Open in Split View"
+          }
+        }
+      }
+    },
     "lc.flek.openRepo" : {
       "extractionState" : "manual",
       "localizations" : {

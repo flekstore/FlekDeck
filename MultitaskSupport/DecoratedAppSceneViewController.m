@@ -179,6 +179,8 @@ static UIInterfaceOrientation LCWindowOrientation(UIView *view, UIMutableApplica
     /// The window was to be re-framed while it flew into its icon, and was left
     /// where it stood instead; it is caught up once it has landed, out of sight.
     BOOL _geometryHeldInFlight;
+    /// Set for the length of `-refreshPaneLayout`.
+    BOOL _paneChangeInProgress;
 }
 - (instancetype)initWindowName:(NSString*)windowName bundleId:(NSString*)bundleId dataUUID:(NSString*)dataUUID rootVC:(UIViewController*)rootVC {
     self = [super initWithNibName:nil bundle:nil];
@@ -801,6 +803,12 @@ static UIInterfaceOrientation LCWindowOrientation(UIView *view, UIMutableApplica
     [self applyMaximizedLayout];
 }
 
+- (void)refreshPaneLayout {
+    _paneChangeInProgress = YES;
+    [self applyMaximizedLayout];
+    _paneChangeInProgress = NO;
+}
+
 - (BOOL)awaitingFirstLayout {
     return _lockedGuestOrientation == UIInterfaceOrientationUnknown;
 }
@@ -851,7 +859,12 @@ static UIInterfaceOrientation LCWindowOrientation(UIView *view, UIMutableApplica
     //
     // Gated on having a settled orientation so a guest opened while the phone is
     // already flat still gets its initial layout; only re-derivation is blocked.
-    if(LCRotationIsLocked() && _lockedGuestOrientation != UIInterfaceOrientationUnknown) return;
+    //
+    // Except for a change of page (see -refreshPaneLayout). The guest keeps the
+    // orientation it is locked to; only the space it is given changes, and an
+    // iPhone Duo opened out is often lying flat when that happens.
+    if(LCRotationIsLocked() && !_paneChangeInProgress
+       && _lockedGuestOrientation != UIInterfaceOrientationUnknown) return;
     // Nor while the window flies into its icon. The flight was aimed from where
     // the window stood as it set off, and a window moved under it lands off its
     // icon by as much as it moved. That is what the bar sliding away on the way
@@ -870,6 +883,16 @@ static UIInterfaceOrientation LCWindowOrientation(UIView *view, UIMutableApplica
 - (UIEdgeInsets)updateMaximizedSafeAreaWithSettings:(UIMutableApplicationSceneSettings *)settings {
     BOOL bottomWindowBar = [NSUserDefaults.lcSharedDefaults boolForKey:@"LCMultitaskBottomWindowBar"];
     UIEdgeInsets safeAreaInsets = self.view.window.safeAreaInsets;
+    // A window on one side of an iPhone Duo opened out reaches the screen's edge
+    // on one side only. The other is the fold, beside the other app, and the
+    // screen's inset on that side is not this window's to keep clear: the left
+    // app has nothing to do with the status bar's column down the right.
+    CGRect pane = [MultitaskDockManager.shared splitPaneFrameForAppUUID:self.dataUUID];
+    if(!CGRectIsNull(pane)) {
+        CGRect area = UIEdgeInsetsInsetRect(self.view.window.bounds, MultitaskDockManager.shared.barReservedInsets);
+        if(CGRectGetMinX(pane) > CGRectGetMinX(area) + 1) safeAreaInsets.left = 0;
+        if(CGRectGetMaxX(pane) < CGRectGetMaxX(area) - 1) safeAreaInsets.right = 0;
+    }
     if(self.navigationBar.hidden) {
         // Whatever the bar already covers is not the guest's to keep clear a second
         // time — but the edge it covers is not always the bottom. It is the viewer's
@@ -1006,6 +1029,13 @@ static UIInterfaceOrientation LCWindowOrientation(UIView *view, UIMutableApplica
     // bar may not be on. Zero insets when no bar is up.
     UIEdgeInsets barInsets = MultitaskDockManager.shared.barReservedInsets;
     maxFrame = UIEdgeInsetsInsetRect(maxFrame, barInsets);
+    // Beside another app, on an iPhone Duo opened out: only this app's side of
+    // the fold. The guest's drawable is sized from the window below, so it is
+    // laid out for its page as it would be for a screen that size.
+    CGRect pane = [MultitaskDockManager.shared splitPaneFrameForAppUUID:self.dataUUID];
+    if(!CGRectIsNull(pane)) {
+        maxFrame = CGRectIntersection(maxFrame, pane);
+    }
 
     // Not held off the sensor housing when turned. A real app turned on its side
     // runs under the island and keeps its own controls clear of it through its

@@ -31,6 +31,12 @@ API_AVAILABLE(ios(16.0))
 /// pushes no settings update of its own would otherwise keep drawing at the
 /// old size, leaving the host's black backdrop showing along the edge that grew.
 - (void)refreshMaximizedLayout;
+/// `refreshMaximizedLayout` for a change of the window's page: the window has
+/// been given one side of an iPhone Duo opened out, or the whole screen back.
+/// Applied even while the phone lies flat, which holds every other re-framing:
+/// that hold is about the device not saying which way it is being read, and
+/// nothing about this change asks it.
+- (void)refreshPaneLayout;
 /// True until this guest has settled on an orientation while the device was being
 /// held — i.e. it has never had a layout worth keeping. The rotation lock exists to
 /// stop geometry being *re-derived* from a device that is not answering; it was

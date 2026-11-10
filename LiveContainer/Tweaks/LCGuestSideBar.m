@@ -25,6 +25,7 @@
 @import ObjectiveC;
 
 #import <notify.h>
+#import <sys/utsname.h>
 
 #import "Tweaks.h"
 
@@ -235,9 +236,54 @@ static void LCReportAfter(Class cls, SEL selector, unsigned int objectArguments,
     }
 }
 
+#pragma mark - The app in use
+
+// With two apps side by side on an iPhone Duo opened out, the one in use is the
+// one last touched, and only the app sees its own touches: they go to it straight,
+// never through the host's views. So each new touch is told to the host, by name
+// as the side bar is, at most every fifth of a second.
+static NSString *gTouchName;
+static void (*gOriginalSendEvent)(id, SEL, UIEvent *);
+static CFAbsoluteTime gLastTouchReport;
+
+static void LCSendEventReportingTouches(id app, SEL selector, UIEvent *event) {
+    if(event.type == UIEventTypeTouches) {
+        for(UITouch *touch in event.allTouches) {
+            if(touch.phase != UITouchPhaseBegan) continue;
+            CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+            if(now - gLastTouchReport > 0.2) {
+                gLastTouchReport = now;
+                notify_post(gTouchName.UTF8String);
+            }
+            break;
+        }
+    }
+    gOriginalSendEvent(app, selector, event);
+}
+
+static BOOL LCIsIPhoneDuo(void) {
+    NSString *simulated = NSProcessInfo.processInfo.environment[@"SIMULATOR_MODEL_IDENTIFIER"];
+    if(simulated) return [simulated isEqualToString:@"iPhone19,4"];
+    struct utsname system;
+    if(uname(&system) != 0) return NO;
+    return strcmp(system.machine, "iPhone19,4") == 0;
+}
+
+/// Only on an iPhone Duo, the one phone with room for two apps side by side:
+/// anywhere else every touch would be told for nothing.
+static void LCGuestTouchReportInit(NSString *dataUUID) {
+    if(!LCIsIPhoneDuo()) return;
+    Method method = class_getInstanceMethod(UIApplication.class, @selector(sendEvent:));
+    if(!method) return;
+    gTouchName = [NSString stringWithFormat:@"com.kdt.livecontainer.touch.%@", dataUUID];
+    gOriginalSendEvent = (void (*)(id, SEL, UIEvent *))method_setImplementation(method, (IMP)LCSendEventReportingTouches);
+}
+
 void LCGuestSideBarInit(NSString *dataUUID) {
     if(dataUUID.length == 0) return;
     if(@available(iOS 27.1, *)) {} else return;
+    // With the rest of what an iPhone Duo needs of the app: see "The app in use".
+    LCGuestTouchReportInit(dataUUID);
     gContainerClass = NSClassFromString(@"_UIFloatingBarContainerView");
     if(!gContainerClass) return;
     gContainers = [NSHashTable weakObjectsHashTable];

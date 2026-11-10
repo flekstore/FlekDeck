@@ -488,6 +488,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
         .onAppear {
             homeBottomSafeInset = LCDeviceSafeArea.bottomInset()
             if !didAppear { onAppear() }
+            if #available(iOS 16.0, *) { registerSplitHooks() }
             if flekstoreSharedModel.appInstallURL != "" {
                 installQueue.enqueue(
                     url: flekstoreSharedModel.appInstallURL,
@@ -1578,7 +1579,58 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
     @ViewBuilder
     // MARK: - UIKit Context Menu (for UIKit springboard)
 
+    /// An icon's menu, with "Open in Split View" added where two apps can be put
+    /// side by side: on an iPhone Duo opened out.
     func homeUIMenu(for item: FlekHomeItem) -> UIMenu? {
+        let menu = homeUIMenuItems(for: item)
+        guard #available(iOS 16.0, *), let split = openInSplitViewAction(for: item) else { return menu }
+        var children = menu?.children ?? []
+        // Below the launch modes where an app's menu starts with them.
+        let index = (children.first as? UIMenu)?.options.contains(.displayInline) == true ? 1 : 0
+        children.insert(split, at: index)
+        return UIMenu(title: menu?.title ?? "", children: children)
+    }
+
+    @available(iOS 16.0, *)
+    private func openInSplitViewAction(for item: FlekHomeItem) -> UIAction? {
+        switch item {
+        case .defaultApp, .installed: break
+        default: return nil
+        }
+        guard MultitaskDockManager.shared.canSplitNow else { return nil }
+        return UIAction(
+            title: "lc.flek.openInSplitView".loc,
+            image: UIImage(systemName: "rectangle.split.2x1")
+        ) { _ in
+            MultitaskDockManager.shared.openInSplitView(item)
+        }
+    }
+
+    /// Lets the multitask dock list the home screen's apps, for the side of the
+    /// screen choosing one, and open them there.
+    @available(iOS 16.0, *)
+    private func registerSplitHooks() {
+        let dock = MultitaskDockManager.shared
+        dock.splitHomeItems = { orderedHomeItems }
+        dock.splitOpenHomeItem = { item in openHomeItemInWindow(item) }
+    }
+
+    /// Opens a home item in a window of its own, whatever launch mode it is set
+    /// to: on a side of the screen an app can only be a window.
+    @available(iOS 16.0, *)
+    private func openHomeItemInWindow(_ item: FlekHomeItem) {
+        switch item {
+        case .defaultApp(let kind):
+            openInternalPageForKind(kind)
+        case .installed(let app):
+            FlekLaunchTracker.shared.markLaunched(app)
+            Task { await launchHomeApp(app, parallel: true) }
+        default:
+            break
+        }
+    }
+
+    private func homeUIMenuItems(for item: FlekHomeItem) -> UIMenu? {
         switch item {
         case .defaultApp(let kind):
             guard kind != .settings && kind != .installer else { return nil }

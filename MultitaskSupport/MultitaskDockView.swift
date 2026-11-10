@@ -216,6 +216,7 @@ class AppInfoProvider {
             if !isHomeState, oldValue { refreshSideColumnRoom() }
             // The next home state's dock may hold other apps, in other places.
             if !isHomeState {
+                if !homeDockIconFrames.isEmpty { lastHomeDockIconFrames = homeDockIconFrames }
                 homeDockIconFrames.removeAll()
                 homeDockPillFrame = .zero
             } else if !oldValue {
@@ -233,6 +234,15 @@ class AppInfoProvider {
     /// Deliberately not `@Published`: it is written from a layout pass, and
     /// publishing it would invalidate the view that just reported it.
     var homeDockIconFrames: [String: CGRect] = [:]
+    /// The home dock's icons as the last home state left them, for a window put
+    /// back out of its icon once that state has already ended: the home button
+    /// ends it before bringing the last app back, and a second app kept beside
+    /// that one has to come out of its own icon too.
+    private var lastHomeDockIconFrames: [String: CGRect] = [:]
+    /// Where each switcher card sits, in window coordinates, as the cards report
+    /// it: a window kept beside the app whose card was pressed comes out of its
+    /// own card. Not `@Published`, as `homeDockIconFrames` is not.
+    var switcherCardFrames: [String: CGRect] = [:]
     /// Where the home dock itself sits, in window coordinates — what a window
     /// aims at when it belongs in the dock but has no icon of its own there, the
     /// dock showing only the four most recent apps.
@@ -272,6 +282,63 @@ class AppInfoProvider {
     /// Where a run of swipes along the bar's app button stands. See
     /// `quickSwitchBegan`.
     private let quickSwitch = MultitaskQuickSwitch()
+
+    /// Two apps side by side, one on each side of an iPhone Duo's fold, or one app
+    /// and the apps to choose the second from. Kept while the screen is turned or
+    /// the switcher is up, and drawn only while the inner display is held open;
+    /// see "Two apps side by side" below.
+    var splitPair: SplitPair? {
+        didSet {
+            // Another two side by side: two kept from going home are apps of
+            // their own again.
+            if splitPair != nil, splitSuspended != nil { dissolveSuspendedSplit() }
+            // The app under the side column may be another one now.
+            if splitPair != oldValue { refreshSideColumnRoom() }
+        }
+    }
+    /// Two apps that were side by side when FlekDeck went home, both still open:
+    /// the switcher shows them as one card, as they were, and brings them back
+    /// side by side from it. Any other way of opening either opens it on its own.
+    var splitSuspended: SplitPair?
+    /// The black on the fold between the two, with its handle.
+    var splitDivider: SplitDividerView?
+    /// The switcher is closing, or going home from over the two: what is drawn
+    /// around them is taken away while the switcher still covers it, and comes
+    /// back once the switcher has gone. The switcher's card of the two grows as
+    /// it fades, and the divider on the screen underneath showed through before
+    /// the card had grown to meet it.
+    var splitChromeAwaitsSwitcher = false
+    /// Windows growing back into their sides after a lift, counted: what is
+    /// drawn around the two waits for them, as it does for windows flying in.
+    var splitSettlingCount = 0
+    /// Darkens the side the divider is being dragged across.
+    var splitCurtain: UIView?
+    /// Apps whose windows left a split on their way in or out, given the whole
+    /// screen back once they have landed, where the change will not be seen.
+    var splitLeftovers: Set<String> = []
+    /// A check of the split's windows is queued: a burst of visibility changes
+    /// makes one.
+    var splitCheckQueued = false
+    /// The apps to choose from, on a side of the screen with no app.
+    var splitPicker: UIHostingController<AnyView>?
+    let splitPickerModel = SplitPickerModel()
+    /// An app chosen for a side that is still starting up.
+    var splitLaunch: SplitLaunch?
+    /// The app button has been held long enough to lift the app in use.
+    var splitLiftArmed = false
+    /// The app lifted off the screen by the app button, under the finger.
+    var splitLift: SplitLift?
+    /// The drop targets at each side while an app is lifted.
+    var splitShelves: [SplitSide: UIView] = [:]
+    /// The handle under each app: its own home indicator.
+    var splitHandles: [SplitSide: SplitHandleView] = [:]
+    /// The app button's tap that ends a lift is not a press of the button.
+    var splitAppButtonTapSuppressed = false
+    /// Set by the home screen: opens one of its items in a window, whatever
+    /// launch mode it has, for a side of the screen.
+    var splitOpenHomeItem: ((FlekHomeItem) -> Void)?
+    /// Set by the home screen: its items, in its order.
+    var splitHomeItems: (() -> [FlekHomeItem])?
     /// The app a swipe along the bar is landing on, which the bar's app button
     /// names from the moment the finger lets go rather than once the window has
     /// settled, and which way the swipe went, for the name to go the same way.
@@ -318,7 +385,9 @@ class AppInfoProvider {
     /// side bar leaves it no room. The floating button stands in for it meanwhile,
     /// as for a bar put away by hand, but nothing has been chosen: the column comes
     /// back by itself once there is room for it again.
-    private(set) var sideColumnStepsAside = false
+    private(set) var sideColumnStepsAside = false {
+        didSet { if sideColumnStepsAside != oldValue { splitControlChanged() } }
+    }
     /// Whether the floating button stands in for the bar: because it was chosen,
     /// or because the side column has no room over the app in front.
     private var usesFloatingButton: Bool { prefersFloatingButton || sideColumnStepsAside }
@@ -457,7 +526,9 @@ class AppInfoProvider {
     /// switcher overlay toggles this; it takes effect the next time an app opens.
     static let preferFloatingButtonKey = "LCMultitaskPreferFloatingButton"
     @Published var prefersFloatingButton: Bool =
-        LCUtils.appGroupUserDefault.bool(forKey: MultitaskDockManager.preferFloatingButtonKey)
+        LCUtils.appGroupUserDefault.bool(forKey: MultitaskDockManager.preferFloatingButtonKey) {
+        didSet { if prefersFloatingButton != oldValue { splitControlChanged() } }
+    }
 
     /// Update and persist the control preference. Does not change what's on
     /// screen right now — it is applied when an app is next opened.
@@ -483,6 +554,21 @@ class AppInfoProvider {
     /// the card's content silently changes underneath whatever size we laid it out
     /// against. An image captured while the app is still on screen cannot drift.
     var appSnapshotImages: [String: UIImage] = [:]
+    /// The apps whose picture was taken beside another app, at half the screen.
+    /// It fits a half of the two's card in the switcher and no card of the app's
+    /// own: one shaped like the whole screen cropped it to a strip of the app, and
+    /// shaped like the picture it stood taller than every card beside it. Such a
+    /// card shows the app's icon until the app has been seen on its own again.
+    private(set) var splitPaneSnapshots: Set<String> = []
+    /// Where on an iPhone Duo a picture was taken: which display, and which way
+    /// up the window was.
+    struct SnapshotDisplay: Equatable {
+        let duo: FlekDeviceModel.DuoDisplay
+        let landscape: Bool
+    }
+    /// Each picture's display on an iPhone Duo; none on any other phone (see
+    /// `pictureFitsDisplay`).
+    private var appSnapshotDisplays: [String: SnapshotDisplay] = [:]
     var internalPageControllers: [String: UIHostingController<AnyView>] = [:]
 
     @objc public var windowHostingView = VirtualWindowsHostView()
@@ -779,8 +865,10 @@ class AppInfoProvider {
         // left behind on the edge it came from would push content off the other side.
         var reserve = UIEdgeInsets.zero
         // Nothing for the side column, which stands in the status bar's own strip —
-        // already inside the page's safe area.
-        if reserved, Self.sideColumnEdge(for: keyWindow?.traitCollection) == nil {
+        // already inside the page's safe area. Nor on an edge the page doesn't
+        // reach, beside another app on the far side of the fold.
+        if reserved, Self.sideColumnEdge(for: keyWindow?.traitCollection) == nil,
+           pageReachesEdge(controller, barLayoutEdge) {
             switch barLayoutEdge {
             case .bottom: reserve.bottom = max(barFlatRegion - insets.bottom, 0)
             case .top:    reserve.top    = max(barFlatRegion - insets.top, 0)
@@ -1296,7 +1384,21 @@ class AppInfoProvider {
                 windowHeight: CGFloat((state >> 48) & 0x7FFF),
                 onRight: (state >> 63) & 1 == 1)
         }
-        if appUUID == frontmostAppUUID { refreshSideColumnRoom() }
+        if appUUID == frontmostAppUUID || splitPair?.contains(appUUID) == true {
+            refreshSideColumnRoom()
+        }
+    }
+
+    /// The app the side column stands over: the one in front, or with two side by
+    /// side, the one on the column's side of the fold, whichever is in use. The
+    /// column only ever stands over that one.
+    private func appUnderSideColumn(_ column: ScreenEdge) -> String? {
+        guard isSplitShowing, let pair = splitPair else { return frontmostAppUUID }
+        switch column {
+        case .left: return pair.left
+        case .right: return pair.right
+        default: return frontmostAppUUID
+        }
     }
 
     /// Where the side column's foot goes over the app in front, in `bounds`: its
@@ -1319,13 +1421,14 @@ class AppInfoProvider {
         return foot - length >= bar.highestTop ? foot : nil
     }
 
-    /// The app in front's own side bar, in `bounds`, where it runs down `column`'s
-    /// side of a window that fills the screen: its lowest group, and the highest
-    /// anything of FlekDeck's may go above it — clear of what the app has higher
-    /// up, or where iOS would start the app's items. Nil for any other app.
+    /// The own side bar of the app under the side column (`appUnderSideColumn`),
+    /// in `bounds`, where it runs down `column`'s side of a window as tall as the
+    /// screen: its lowest group, and the highest anything of FlekDeck's may go
+    /// above it — clear of what the app has higher up, or where iOS would start
+    /// the app's items. Nil for any other app.
     private func frontmostSideBar(column: ScreenEdge, in bounds: CGRect)
         -> (lowerTop: CGFloat, lowerBottom: CGFloat, highestTop: CGFloat)? {
-        guard let uuid = frontmostAppUUID,
+        guard let uuid = appUnderSideColumn(column),
               let bar = guestSideBars[uuid],
               bar.onRight == (column == .right),
               bar.windowHeight > 0,
@@ -1460,6 +1563,7 @@ class AppInfoProvider {
         }
         return apps.last?.appName ?? "App"
     }
+
     
     override init() {
         super.init()
@@ -2070,10 +2174,15 @@ class AppInfoProvider {
             withAnimation(.spring(response: 0.35, dampingFraction: 0.82)) {
                 self.apps.removeAll { $0.appUUID == appUUID }
             }
+            // One of two side by side closed: the other has the screen to itself.
+            if self.splitPair?.contains(appUUID) == true { self.endSplit() }
+            if self.splitSuspended?.contains(appUUID) == true { self.dissolveSuspendedSplit() }
             self.appSnapshotViews.removeValue(forKey: appUUID)
             self.appSnapshotSizes.removeValue(forKey: appUUID)
             self.appSnapshotImages.removeValue(forKey: appUUID)
             self.appSnapshotRotations.removeValue(forKey: appUUID)
+            self.splitPaneSnapshots.remove(appUUID)
+            self.appSnapshotDisplays.removeValue(forKey: appUUID)
             if let hostVC = self.internalPageControllers.removeValue(forKey: appUUID) {
                 hostVC.willMove(toParent: nil)
                 hostVC.view.removeFromSuperview()
@@ -2452,6 +2561,8 @@ class AppInfoProvider {
     ///
     /// Built-in pages are excluded: they are our own SwiftUI and carry no lock.
     private var frontmostAppOrientations: UIInterfaceOrientationMask? {
+        // Two side by side: one app's lock would turn the other with it.
+        guard !isSplitShowing else { return nil }
         guard let uuid = frontmostAppUUID,
               let app = apps.first(where: { $0.appUUID == uuid }),
               !app.isInternalPage,
@@ -3336,7 +3447,7 @@ class AppInfoProvider {
         guard let windowScene = keyWindow?.windowScene else {
             return false
         }
-        
+
         // Capture snapshot of the current frontmost app before switching away from it
         if let currentFrontmost = self.frontmostAppUUID, currentFrontmost != uuid {
             captureSnapshot(for: currentFrontmost)
@@ -3344,12 +3455,30 @@ class AppInfoProvider {
 
         for window in windowScene.windows {
             if let targetView = findMultitaskView(in: window, withUUID: uuid) {
+                // A third app coming forward ends two side by side; either of the
+                // two is only the other one being used. Decided here, once there is
+                // a window to come forward: every launch first asks this whether its
+                // app has one, and an app chosen for a side, asking that before it
+                // has started, ended the split it was chosen for and opened full
+                // screen.
+                if let pair = splitPair, !pair.contains(uuid) { endSplit() }
+                // One of two kept from going home: both come back as they were.
+                if let kept = splitSuspended, kept.contains(uuid) {
+                    // Only the home dock's icons pass themselves as `fromIcon`.
+                    restoreSuspendedSplit(kept, bringingForward: uuid,
+                                          fromDock: fromIcon != nil,
+                                          fromCard: fromRect != nil, cardRadius: fromRectRadius)
+                }
+                // Paired with another app: framed for its side before it comes
+                // forward, and the other opened beside it once it has.
+                let openPartner = splitPartnerOpener(for: uuid)
                 passURLSchemeToView(targetView)
                 // The window being left behind takes its modals with it. Windows here
                 // are always maximized, so a sheet belonging to one of them would
                 // otherwise be left sitting over the window arriving in its place —
                 // the switcher's path to another app never minimizes the old one.
-                for other in self.apps where other.appUUID != uuid {
+                for other in self.apps where other.appUUID != uuid
+                    && self.splitPair?.contains(other.appUUID) != true {
                     self.dismissPresentation(forAppUUID: other.appUUID)
                 }
                 let source = fromRect ?? fromIcon
@@ -3361,6 +3490,7 @@ class AppInfoProvider {
                                       sourceRadius: fromRect == nil ? nil : fromRectRadius,
                                       fadesIn: fromRect == nil, in: window)
                 windowTookStage(uuid: uuid)
+                openPartner?()
                 return true
             }
         }
@@ -3377,6 +3507,10 @@ class AppInfoProvider {
     /// anywhere else the bar is already up and only re-measures itself against
     /// the app now in front.
     private func windowTookStage(uuid: String) {
+        if let pair = splitPair, !pair.contains(uuid) { endSplit() }
+        // One of two kept from going home, come forward some way that brings
+        // only it, a swipe along the bar: it is an app of its own again.
+        if splitSuspended?.contains(uuid) == true { dissolveSuspendedSplit(except: uuid) }
         let wasHomeState = isHomeState
         isHomeState = false
         frontmostAppUUID = uuid
@@ -3436,6 +3570,8 @@ class AppInfoProvider {
     /// already floating.
     private func floatWindowLeavingStage(_ uuid: String?) {
         guard let uuid, uuid != frontmostAppUUID || isHomeState else { return }
+        // Beside the app now in use, it is still on screen.
+        if !isHomeState, splitPair?.contains(uuid) == true { return }
         guard let pipManager = PiPManager.shared, !pipManager.isPiP else { return }
         guard let decoratedVC = apps.first(where: { $0.appUUID == uuid })?.view?._viewDelegate()
                 as? DecoratedAppSceneViewController,
@@ -3636,9 +3772,15 @@ class AppInfoProvider {
         }
 
         DispatchQueue.main.async {
+            // Chosen for a side of the screen: it opens onto that side.
+            if self.takeArrivingWindowIntoSplit(appModel) { return }
+            self.endSplit()
             self.apps.append(appModel)
             self.frontmostAppUUID = appUUID
             self.isHomeState = false
+            // Paired with another app: framed for its side before it opens, and the
+            // other opened beside it.
+            let openPartner = self.splitPartnerOpener(for: appUUID)
 
             // Opens at once, carrying the app's launch screen. The guest has drawn
             // nothing yet, but its bundle has been readable all along, so there is
@@ -3647,6 +3789,7 @@ class AppInfoProvider {
             if let view {
                 LCMinimizeToIconAnimator.expand(view, fromItemID: appModel.springboardItemID)
             }
+            openPartner?()
 
             // The bar comes up with the window, never ahead of it: it is the
             // control for a foreground window, and on a screen that still shows
@@ -3704,13 +3847,17 @@ class AppInfoProvider {
         let appModel = DockAppModel(appName: name, appUUID: uuid, view: hostVC.view, internalPageKind: kind)
         
         DispatchQueue.main.async {
+            if self.takeArrivingWindowIntoSplit(appModel) { return }
+            self.endSplit()
             self.apps.append(appModel)
             self.frontmostAppUUID = uuid
             self.isHomeState = false
+            let openPartner = self.splitPartnerOpener(for: uuid)
 
             // Out of its own icon, the same as a guest app — this page used to
             // simply be there, one frame absent and the next full screen.
             LCMinimizeToIconAnimator.expand(hostVC.view, fromItemID: appModel.springboardItemID)
+            openPartner?()
 
             if !self.isVisible {
                 self.showDock()
@@ -3868,14 +4015,31 @@ class AppInfoProvider {
             // or nothing, and those windows are genuinely on screen beside it, so
             // they keep an exit of their own rather than blinking out.
             let covered = flying?.frame ?? .null
+            // Two side by side go home together, each into its own icon in the
+            // dock's tile for the two, rather than the one in front alone.
+            var flyingTogether: Set<String> = []
+            if style == .intoIcons, let flying, let pair = self.splitPair,
+               let flyingUUID = self.apps.first(where: { $0.view === flying })?.appUUID,
+               pair.contains(flyingUUID) {
+                flyingTogether = Set(pair.members)
+            }
+            // Making way for one of two side by side, the other stays.
+            var spared: Set<String> = []
+            if let pair = self.splitPair, let except,
+               let kept = self.apps.first(where: { $0.view === except.view })?.appUUID,
+               pair.contains(kept) {
+                spared = Set(pair.members)
+            }
             self.apps.forEach { app in
+                if spared.contains(app.appUUID) { return }
                 if app.isInternalPage {
                     guard let pageView = app.view else { return }
                     // The page's sheet goes first and the flight waits for it, so the
                     // page leaves from the window rather than from inside the
                     // presentation it was hosted in.
                     self.dismissPresentation(forAppUUID: app.appUUID) {
-                        if style == .intoIcons, pageView === flying,
+                        if style == .intoIcons,
+                           pageView === flying || flyingTogether.contains(app.appUUID),
                            let itemID = app.springboardItemID {
                             LCMinimizeToIconAnimator.minimize(pageView, toItemID: itemID)
                         } else {
@@ -3892,7 +4056,8 @@ class AppInfoProvider {
                         // in the resting state the window class expects, which is what
                         // `finishMinimizeWindow` is for.
                         if style == .intoIcons, let guestView = app.view,
-                           guestView === flying, let itemID = app.springboardItemID {
+                           guestView === flying || flyingTogether.contains(app.appUUID),
+                           let itemID = app.springboardItemID {
                             LCMinimizeToIconAnimator.minimize(guestView, toItemID: itemID) {
                                 vc.finishMinimizeWindow()
                             }
@@ -4026,22 +4191,7 @@ class AppInfoProvider {
         // near enough to stand a landscape view on its end.
         var quarterTurn: CGFloat = 0
         if appView.bounds.width > appView.bounds.height {
-            let interfaceOrientation = appView.window?.windowScene?.interfaceOrientation
-                ?? keyWindow?.windowScene?.interfaceOrientation
-            switch interfaceOrientation {
-            case .landscapeLeft:
-                quarterTurn = -.pi / 2
-            case .landscapeRight:
-                quarterTurn = .pi / 2
-            default:
-                // The interface is portrait but the capture is not: a landscape-only
-                // guest rendering sideways inside an upright host. The interface can't
-                // say which way it is being read, so use the device. Note the axes are
-                // mirrored — device landscapeLeft is interface landscapeRight.
-                // Last valid reading: face-up would otherwise silently pick the
-                // other direction and capture the card upside down.
-                quarterTurn = self.lastValidDeviceOrientation == .landscapeLeft ? .pi / 2 : -.pi / 2
-            }
+            quarterTurn = landscapePictureTurn(of: appView)
         }
 
         // Capture the content region, dropping the safe-area periphery on every edge
@@ -4064,18 +4214,36 @@ class AppInfoProvider {
         // landscape has no top inset to keep), and it covers the one case the turn
         // cannot: an iPad, whose card takes the screen's shape, so a landscape capture
         // is drawn flat in a landscape card with its top edge still on top.
-        var trim = appView.safeAreaInsets
-        trim.top = 0
-        if quarterTurn > 0 {
-            trim.left = 0
-        } else if quarterTurn < 0 {
-            trim.right = 0
-        }
+        //
+        // Beside another app, the picture is one half of the two's card, and is
+        // trimmed as a picture of the whole screen would be, which is landscape: the
+        // side the status bar's column stands on is kept, as a card of one app keeps
+        // it. The two halves and the fold between them then make the shape of a
+        // card of one app, and the pair stands as tall as the cards beside it.
+        let inPane = !splitPaneFrame(forAppUUID: appUUID).isNull
+        let trim = Self.pictureTrim(of: appView.safeAreaInsets,
+                                    turn: inPane ? landscapePictureTurn(of: appView) : quarterTurn)
         let captureRect = appView.bounds.inset(by: trim)
         let viewSize = captureRect.size
         guard viewSize.width > 0 && viewSize.height > 0 else { return }
 
         appSnapshotRotations[appUUID] = quarterTurn
+        // Beside another app, this is a picture of half the screen: for the two's
+        // card, and no card of the app's own (see `splitPaneSnapshots`).
+        if inPane {
+            splitPaneSnapshots.insert(appUUID)
+        } else {
+            splitPaneSnapshots.remove(appUUID)
+        }
+        // Which of an iPhone Duo's displays, and which way up (see
+        // `pictureFitsDisplay`).
+        if let window = appView.window, let screen = window.windowScene?.screen,
+           let display = FlekDeviceModel.duoDisplay(of: screen) {
+            appSnapshotDisplays[appUUID] = SnapshotDisplay(
+                duo: display, landscape: window.bounds.width > window.bounds.height)
+        } else {
+            appSnapshotDisplays.removeValue(forKey: appUUID)
+        }
 
         // A frozen bitmap of the app exactly as it looks right now. `drawHierarchy`
         // renders through the render server, so unlike `layer.render(in:)` it can
@@ -4132,6 +4300,71 @@ class AppInfoProvider {
         }
     }
     
+    /// The quarter turn a landscape picture needs to stand upright in a PORTRAIT
+    /// card. Which way depends on the edge the user turned towards, so the content
+    /// ends up the same way up as when they were looking at it.
+    private func landscapePictureTurn(of view: UIView) -> CGFloat {
+        let interfaceOrientation = view.window?.windowScene?.interfaceOrientation
+            ?? keyWindow?.windowScene?.interfaceOrientation
+        switch interfaceOrientation {
+        case .landscapeLeft:
+            return -.pi / 2
+        case .landscapeRight:
+            return .pi / 2
+        default:
+            // The interface is portrait but the capture is not: a landscape-only
+            // guest rendering sideways inside an upright host. The interface can't
+            // say which way it is being read, so use the device. Note the axes are
+            // mirrored — device landscapeLeft is interface landscapeRight.
+            // Last valid reading: face-up would otherwise silently pick the
+            // other direction and capture the card upside down.
+            return lastValidDeviceOrientation == .landscapeLeft ? .pi / 2 : -.pi / 2
+        }
+    }
+
+    /// What a picture leaves out of the safe area `insets` (see `captureSnapshot`):
+    /// every edge but the one along the top of its card. That is the picture's own
+    /// top, and for a landscape picture turned by `turn`, the side the turn brings
+    /// up there too.
+    private static func pictureTrim(of insets: UIEdgeInsets, turn: CGFloat) -> UIEdgeInsets {
+        var trim = insets
+        trim.top = 0
+        if turn > 0 {
+            trim.left = 0
+        } else if turn < 0 {
+            trim.right = 0
+        }
+        return trim
+    }
+
+    /// The shape of a picture of an app with the whole of a `screen`-sized screen,
+    /// with `insets` for its safe area, as `captureSnapshot` would take it now: what
+    /// shapes a card with no picture of its own to go by.
+    func wholeScreenPictureSize(screen: CGSize, insets: UIEdgeInsets) -> CGSize {
+        let turn = screen.width > screen.height ? landscapePictureTurn(of: windowHostingView) : 0
+        let trim = Self.pictureTrim(of: insets, turn: turn)
+        return CGSize(width: max(screen.width - trim.left - trim.right, 1),
+                      height: max(screen.height - trim.top - trim.bottom, 1))
+    }
+
+    /// Whether `uuid`'s picture was taken on the display the switcher is on now,
+    /// and on the inner one the same way up. An iPhone Duo's apps lay themselves
+    /// out again for the other display, or for the inner one turned, so a picture
+    /// from before shows an app as it will not be: one from the cover display,
+    /// shaped and filled to a card on the inner one, stood taller than every card
+    /// beside it, its rows half again their size. The cover display keeps its
+    /// pictures of apps held sideways: its switcher is always upright, and such a
+    /// picture is turned to stand up in its card, as on any other iPhone. Always
+    /// on any other phone.
+    func pictureFitsDisplay(_ uuid: String) -> Bool {
+        guard let taken = appSnapshotDisplays[uuid],
+              let screen = (windowHostingView.window ?? keyWindow)?.windowScene?.screen,
+              let display = FlekDeviceModel.duoDisplay(of: screen) else { return true }
+        guard taken.duo == display else { return false }
+        if display == .cover { return true }
+        return taken.landscape == (switcherScreenSize.width > switcherScreenSize.height)
+    }
+
     /// The turn a card should apply to a capture, given the shape the card has now.
     /// Zero for a landscape card: the turn only ever existed to stand a landscape
     /// capture up in a portrait one, and applying it to a card that is already
@@ -4271,6 +4504,8 @@ class AppInfoProvider {
 
         // Always recreate the overlay so it picks up the latest apps & snapshots
         switcherOverlayController?.view.removeFromSuperview()
+        // Its cards report where they are as they lay out.
+        switcherCardFrames.removeAll()
 
         // Resolve the window's safe area before the overlay reads it, so the bottom
         // toggle bar's height (effectiveBarHeight + safeAreaInsets.bottom) is stable
@@ -4360,6 +4595,10 @@ class AppInfoProvider {
     func goToSpringboardFromSwitcher() {
         guard isAppSwitcherOpen else { return }
         isAppSwitcherOpen = false
+        // What is drawn around two side by side goes now, with the windows and
+        // before the overlay starts to clear, rather than a moment after them.
+        splitChromeAwaitsSwitcher = true
+        UIView.performWithoutAnimation { self.syncSplitChrome() }
         // The overlay above is already clearing to reveal the springboard, and a
         // window moving underneath it is seen through it. They go without a move.
         minimizeAllWindows(style: .immediate)
@@ -4367,7 +4606,10 @@ class AppInfoProvider {
         isHomeState = true
         hideDock()
         refreshOrientationLock()
-        guard let overlay = switcherOverlayController else { return }
+        guard let overlay = switcherOverlayController else {
+            splitChromeAwaitsSwitcher = false
+            return
+        }
         // Clear the overlay's opaque backdrop so the LIVE springboard behind it (its
         // glass already rendering) shows through as the switcher content animates out —
         // cards slide left, buttons drop, and the blurred-home background fades away.
@@ -4385,6 +4627,8 @@ class AppInfoProvider {
             overlay.view.transform = .identity
             self.springboardSnapshot = nil
             self.ensureControlAccessible()
+            self.splitChromeAwaitsSwitcher = false
+            self.syncSplitChrome()
         }
     }
 
@@ -4460,6 +4704,10 @@ class AppInfoProvider {
         // See -goToSpringboardFromSwitcher: it is fading out and must not keep
         // swallowing touches on the way.
         overlay.view.isUserInteractionEnabled = false
+        // What is drawn around two side by side, taken away now, while the
+        // switcher still covers it, and brought back once it has gone.
+        splitChromeAwaitsSwitcher = true
+        UIView.performWithoutAnimation { self.syncSplitChrome() }
 
         // The grow is the overlay's own, not the window's: grown as a whole, the
         // chin came apart from the bar under it, the two drawn over each other a
@@ -4478,6 +4726,8 @@ class AppInfoProvider {
             if self.switcherOverlayController === overlay { self.isDismissingAppSwitcher = false }
             self.springboardSnapshot = nil
             self.ensureControlAccessible()
+            self.splitChromeAwaitsSwitcher = false
+            self.syncSplitChrome()
         }
     }
 
@@ -4623,6 +4873,8 @@ class AppInfoProvider {
             self.appSnapshotSizes.removeAll()
             self.appSnapshotImages.removeAll()
             self.appSnapshotRotations.removeAll()
+            self.splitPaneSnapshots.removeAll()
+            self.appSnapshotDisplays.removeAll()
             self.updateFrontmostApp()
             self.isClosingAll = false
             self.isAppSwitcherOpen = false
@@ -5042,6 +5294,12 @@ struct SwitcherBarContentView: View {
     }
 
     private func toggleAppSwitcher() {
+        // Let go after lifting the app off the screen: the end of the lift, not a
+        // press of the button.
+        if dockManager.splitAppButtonTapSuppressed {
+            dockManager.splitAppButtonTapSuppressed = false
+            return
+        }
         MultitaskDockManager.buttonHaptic()
         if dockManager.isAppSwitcherOpen {
             dockManager.dismissAppSwitcher()
@@ -5086,6 +5344,7 @@ struct SwitcherBarContentView: View {
             }
             .accessibilityLabel("App Switcher")
             .modifier(QuickSwitchSwipe())
+            .modifier(SplitLiftGesture())
 
             BarControlButton(action: goHome) {
                 Image(systemName: "app")
@@ -5121,6 +5380,7 @@ struct SwitcherBarContentView: View {
             }
             .accessibilityLabel("App Switcher")
             .modifier(QuickSwitchSwipe())
+            .modifier(SplitLiftGesture())
 
             // Right: Home button
             BarControlButton(action: goHome) {
@@ -5628,16 +5888,17 @@ struct AppSwitcherOverlay: View {
     /// drops too. An iPhone held upright has none; an iPhone Duo's status bar runs
     /// down one side, an 84pt column of inset, and a card shaped from the whole
     /// width was too wide for the snapshot it held: filling it cut the app's title
-    /// off the top and its last rows off the bottom.
+    /// off the top and its last rows off the bottom. Held landscape, as an iPhone
+    /// Duo opened out is, a snapshot keeps that column, as the side it would turn
+    /// up to the top, and so does this; trimmed of it, a card with no picture yet
+    /// stood a tenth taller than the cards beside it.
     ///
     /// The shape of a card with no snapshot to go by yet, and of every card on
     /// iPad. See `cardHeight(for:)` for the rest.
     private var defaultCardHeight: CGFloat {
-        let screen = dockManager.switcherScreenSize
-        let insets = dockManager.cachedSafeAreaInsets
-        let contentHeight = max(screen.height - insets.bottom, 1)
-        let contentWidth = max(screen.width - insets.left - insets.right, 1)
-        return min(cardWidth * (contentHeight / contentWidth), maxCardHeight)
+        let picture = dockManager.wholeScreenPictureSize(screen: dockManager.switcherScreenSize,
+                                                         insets: dockManager.cachedSafeAreaInsets)
+        return min(cardWidth * (picture.height / picture.width), maxCardHeight)
     }
 
     /// The tallest a card can be: what the column has left once the top spacer,
@@ -5659,7 +5920,7 @@ struct AppSwitcherOverlay: View {
     /// On iPad every card keeps the screen's shape, as it always has.
     private func cardHeight(for app: DockAppModel) -> CGFloat {
         let fallback = defaultCardHeight
-        guard !FlekDeviceModel.isPad,
+        guard !FlekDeviceModel.isPad, pictureFits(app, inSplit: false),
               let size = dockManager.appSnapshotSizes[app.appUUID],
               size.width > 0, size.height > 0 else { return fallback }
         let turned = dockManager.cardSnapshotRotation(for: app.appUUID,
@@ -5667,6 +5928,166 @@ struct AppSwitcherOverlay: View {
         // Height over width, as the card shows it.
         let aspect = turned ? size.width / size.height : size.height / size.width
         return min(cardWidth * aspect, maxCardHeight)
+    }
+
+    /// What the row shows, oldest first: a card for each app, except two side by
+    /// side on an iPhone Duo, which share one where the more recent of them would
+    /// be, as iOS shows a pair in Split View. That is so while they are side by
+    /// side, with one beside the apps to choose from too, and after going home
+    /// from them while both are still open: the switcher shows them as they were,
+    /// and brings them back that way.
+    private enum SwitcherItem: Identifiable {
+        case single(DockAppModel)
+        case split(left: DockAppModel?, right: DockAppModel?)
+
+        var id: String {
+            switch self {
+            case .single(let app): return app.appUUID
+            case .split(let left, let right):
+                return "split:\(left?.appUUID ?? "-")|\(right?.appUUID ?? "-")"
+            }
+        }
+
+        func contains(_ uuid: String) -> Bool {
+            switch self {
+            case .single(let app): return app.appUUID == uuid
+            case .split(let left, let right): return left?.appUUID == uuid || right?.appUUID == uuid
+            }
+        }
+    }
+
+    private var switcherItems: [SwitcherItem] {
+        let apps = dockManager.apps
+        // Folded, they are one at a time, and so are their cards.
+        guard dockManager.canSplitNow,
+              let pair = dockManager.splitPair ?? dockManager.splitSuspended else {
+            return apps.map { .single($0) }
+        }
+        let left = pair.left.flatMap { id in apps.first { $0.appUUID == id } }
+        let right = pair.right.flatMap { id in apps.first { $0.appUUID == id } }
+        guard left != nil || right != nil,
+              let last = apps.lastIndex(where: { pair.contains($0.appUUID) }) else {
+            return apps.map { .single($0) }
+        }
+        var items: [SwitcherItem] = []
+        for (index, app) in apps.enumerated() {
+            if !pair.contains(app.appUUID) {
+                items.append(.single(app))
+            } else if index == last {
+                items.append(.split(left: left, right: right))
+            }
+        }
+        return items
+    }
+
+    /// The row's item an app is shown in, to scroll to.
+    private func switcherItemID(for uuid: String) -> String {
+        switcherItems.first { $0.contains(uuid) }?.id ?? uuid
+    }
+
+    @ViewBuilder
+    private func switcherCard(_ item: SwitcherItem, index: Int) -> some View {
+        switch item {
+        case .single(let app):
+            AppSwitcherCard(app: app, cardWidth: cardWidth, cardHeight: cardHeight(for: app),
+                            cornerRadius: cardCornerRadius, cardIndex: index,
+                            showsPicture: pictureFits(app, inSplit: false))
+        case .split(let left, let right):
+            // One card for the two, as iOS shows a pair in Split View: the screen as
+            // it was, the two pictures side by side with the fold's black between
+            // them, at the size of a card of one app. Each half keeps its app's name
+            // and controls over it: a tap on either brings the two back side by
+            // side, with that one in use, and either swiped away closes only that
+            // app. A side with the apps to choose from on it is left empty.
+            //
+            // Left to right whatever the language, as the screen it pictures is.
+            let layout = pairCardLayout(left, right)
+            HStack(alignment: .top, spacing: 0) {
+                splitHalf(left, size: layout.left, index: index,
+                          fold: SwitcherCardFold(edge: .trailing, gap: layout.gap / 2,
+                                                 cornerRadius: layout.foldRadius))
+                splitHalf(right, size: layout.right, index: index,
+                          fold: SwitcherCardFold(edge: .leading, gap: layout.gap / 2,
+                                                 cornerRadius: layout.foldRadius))
+            }
+            .environment(\.layoutDirection, .leftToRight)
+        }
+    }
+
+    @ViewBuilder
+    private func splitHalf(_ app: DockAppModel?, size: CGSize, index: Int,
+                           fold: SwitcherCardFold) -> some View {
+        if let app {
+            AppSwitcherCard(app: app, cardWidth: size.width, cardHeight: size.height,
+                            cornerRadius: cardCornerRadius, cardIndex: index,
+                            showsPicture: pictureFits(app, inSplit: true), fold: fold)
+        } else {
+            // Where a card's header would be, then the side's space.
+            VStack(alignment: fold.headerAlignment, spacing: 8) {
+                Color.clear.frame(width: size.width, height: 32)
+                Color.white.opacity(0.08)
+                    .frame(width: size.width, height: size.height)
+                    .switcherCardClip(cornerRadius: cardCornerRadius, fold: fold)
+            }
+        }
+    }
+
+    /// Whether `app`'s picture fits the card it is on: one taken beside another
+    /// app for a half of the two's card, any other for a card of its own, and
+    /// either only on the display it was taken on. A card whose picture doesn't
+    /// fit shows the app's icon instead, at the card's own shape (see
+    /// `MultitaskDockManager.splitPaneSnapshots` and `pictureFitsDisplay`).
+    private func pictureFits(_ app: DockAppModel, inSplit: Bool) -> Bool {
+        dockManager.splitPaneSnapshots.contains(app.appUUID) == inSplit
+            && dockManager.pictureFitsDisplay(app.appUUID)
+    }
+
+    /// Width over height of an app's picture, as its card shows it.
+    private func snapshotAspect(_ app: DockAppModel, portraitCard: Bool) -> CGFloat? {
+        guard let size = dockManager.appSnapshotSizes[app.appUUID],
+              size.width > 0, size.height > 0 else { return nil }
+        let turned = dockManager.cardSnapshotRotation(for: app.appUUID, portraitCard: portraitCard) != 0
+        return turned ? size.height / size.width : size.width / size.height
+    }
+
+    /// A split's card: each half's picture, and the fold between them.
+    private struct PairCardLayout {
+        var left: CGSize
+        var right: CGSize
+        /// The black between the two pictures.
+        var gap: CGFloat
+        /// The corners the fold rounds each picture off by on its side.
+        var foldRadius: CGFloat
+    }
+
+    /// A split's card, drawn as the screen shows the two: one height, each half as
+    /// wide as its app's picture at that height, and the fold between them at its
+    /// width on screen, all scaled alike. Pictured as the screen is, the two and the
+    /// fold together make the shape of a picture of one app, so the pair is exactly
+    /// as wide as a card of one app and as tall; narrower only where that would be
+    /// taller than the column has room for. A side with no app, or no picture of it
+    /// from beside the other, is the shape its picture would be.
+    private func pairCardLayout(_ left: DockAppModel?, _ right: DockAppModel?) -> PairCardLayout {
+        let leftShape = dockManager.splitPictureShape(.left)
+        let rightShape = dockManager.splitPictureShape(.right)
+        func aspect(_ app: DockAppModel?, _ shape: CGSize) -> CGFloat {
+            if let app, pictureFits(app, inSplit: true),
+               let pictureAspect = snapshotAspect(app, portraitCard: true) {
+                return pictureAspect
+            }
+            return shape.width / shape.height
+        }
+        let leftAspect = aspect(left, leftShape)
+        let rightAspect = aspect(right, rightShape)
+        // The fold, in heights of a picture.
+        let pictureHeight = max(leftShape.height, 1)
+        let foldAspect = MultitaskDockManager.splitGap / pictureHeight
+        let height = min(cardWidth / max(leftAspect + rightAspect + foldAspect, 0.01), maxCardHeight)
+        let scale = height / pictureHeight
+        return PairCardLayout(left: CGSize(width: height * leftAspect, height: height),
+                              right: CGSize(width: height * rightAspect, height: height),
+                              gap: MultitaskDockManager.splitGap * scale,
+                              foldRadius: SplitDividerView.cornerRadius * scale)
     }
 
     /// What the column keeps free under the cards: the chin's footprint, or with the
@@ -5763,7 +6184,8 @@ struct AppSwitcherOverlay: View {
                         // (the `apps` array keeps the most-recent app at the end).
                         // Without this fallback the scroll was skipped and the view
                         // rested at its leading edge, showing the leftmost (oldest) card.
-                        let target = dockManager.frontmostAppUUID ?? dockManager.apps.last?.appUUID
+                        let target = (dockManager.frontmostAppUUID ?? dockManager.apps.last?.appUUID)
+                            .map(switcherItemID(for:))
                         if let target {
                             // Defer to the next runloop so the scroll target layout is
                             // resolved before we scroll: calling scrollTo before layout
@@ -5790,8 +6212,8 @@ struct AppSwitcherOverlay: View {
                     // width before it is centred; scrolling against the old one lands
                     // between cards.
                     .onChange(of: dockManager.switcherScreenSize) { _ in
-                        guard let target = dockManager.frontmostAppUUID
-                                ?? dockManager.apps.last?.appUUID else { return }
+                        guard let target = (dockManager.frontmostAppUUID
+                                ?? dockManager.apps.last?.appUUID).map(switcherItemID(for:)) else { return }
                         DispatchQueue.main.async {
                             withAnimation(.easeInOut(duration: MultitaskDockManager.rotationDuration)) {
                                 proxy.scrollTo(target, anchor: .center)
@@ -6089,15 +6511,9 @@ struct AppSwitcherOverlay: View {
 
     private var cardRow: some View {
         HStack(alignment: .top, spacing: cardSpacing) {
-            ForEach(Array(dockManager.apps.enumerated()), id: \.element.appUUID) { pair in
-                AppSwitcherCard(
-                    app: pair.element,
-                    cardWidth: cardWidth,
-                    cardHeight: cardHeight(for: pair.element),
-                    cornerRadius: cardCornerRadius,
-                    cardIndex: pair.offset
-                )
-                .id(pair.element.appUUID)
+            ForEach(Array(switcherItems.enumerated()), id: \.element.id) { pair in
+                switcherCard(pair.element, index: pair.offset)
+                .id(pair.element.id)
                 // Graceful exit if the card is removed while still partly on-screen.
                 .transition(.move(edge: .top).combined(with: .opacity))
                 .scaleEffect(isPresented ? 1.0 : 0.85)
@@ -6732,6 +7148,101 @@ struct CustomizeMenuButton: UIViewRepresentable {
     }
 }
 
+// MARK: - Split cards
+
+/// A switcher card that is one half of a split's card: where the other half is,
+/// and the fold between the two as the screen shows it.
+@available(iOS 16.0, *)
+struct SwitcherCardFold {
+    /// The side of this half the other half is on.
+    var edge: HorizontalEdge
+    /// This half's share of the black between the two pictures.
+    var gap: CGFloat
+    /// The corners the fold rounds the picture off by on its side.
+    var cornerRadius: CGFloat
+
+    /// The half's name and controls stand over its picture, not over its share
+    /// of the gap.
+    var headerAlignment: HorizontalAlignment { edge == .trailing ? .leading : .trailing }
+}
+
+/// One half of a split's card: a lone card's corners on its outer side, the
+/// fold's smaller ones on the side the other half is on.
+@available(iOS 16.0, *)
+struct SwitcherHalfShape: Shape {
+    var outerRadius: CGFloat
+    var foldRadius: CGFloat
+    var foldEdge: HorizontalEdge
+
+    func path(in rect: CGRect) -> Path {
+        // Each pair of corners from a rounded rectangle of its own, carried past the
+        // far side so its corners there are out of the way, and the two intersected:
+        // both keep the continuous curve of a lone card's corners.
+        let towardsFold: CGFloat = foldEdge == .trailing ? 1 : -1
+        let outer = Path(roundedRect: rect.union(rect.offsetBy(dx: towardsFold * outerRadius * 2, dy: 0)),
+                         cornerRadius: outerRadius, style: .continuous)
+        let fold = Path(roundedRect: rect.union(rect.offsetBy(dx: -towardsFold * foldRadius * 2, dy: 0)),
+                        cornerRadius: foldRadius, style: .continuous)
+        return Path(outer.cgPath.intersection(fold.cgPath))
+    }
+}
+
+/// The black behind the fold's side of a half: its share of the gap, and the
+/// corners the fold rounds off its picture, which on screen are the divider's.
+@available(iOS 16.0, *)
+struct SwitcherFoldBacking: Shape {
+    var gap: CGFloat
+    var cornerRadius: CGFloat
+    var edge: HorizontalEdge
+
+    func path(in rect: CGRect) -> Path {
+        let corners = gap + cornerRadius
+        let bandX = edge == .trailing ? rect.maxX - gap : rect.minX
+        let cornersX = edge == .trailing ? rect.maxX - corners : rect.minX
+        var path = Path()
+        path.addRect(CGRect(x: bandX, y: rect.minY, width: gap, height: rect.height))
+        path.addRect(CGRect(x: cornersX, y: rect.minY, width: corners, height: cornerRadius))
+        path.addRect(CGRect(x: cornersX, y: rect.maxY - cornerRadius, width: corners, height: cornerRadius))
+        return path
+    }
+}
+
+@available(iOS 16.0, *)
+extension View {
+    /// Clips a switcher card's picture to the card's corners. As one half of a
+    /// split's card, only the outer ones: on the fold's side it has the fold's own
+    /// corners and its share of the black between the two, as the screen has them.
+    @ViewBuilder
+    func switcherCardClip(cornerRadius: CGFloat, fold: SwitcherCardFold?) -> some View {
+        if let fold {
+            clipShape(SwitcherHalfShape(outerRadius: cornerRadius, foldRadius: fold.cornerRadius,
+                                        foldEdge: fold.edge))
+                .padding(fold.edge == .trailing ? Edge.Set.trailing : Edge.Set.leading, fold.gap)
+                .background(SwitcherFoldBacking(gap: fold.gap, cornerRadius: fold.cornerRadius,
+                                                edge: fold.edge).fill(Color.black))
+        } else {
+            clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
+        }
+    }
+
+    /// A switcher card's shadow. Under one half of a split's card it stops at the
+    /// fold, where the other half carries on: cast over that half, it darkened the
+    /// edge beside the fold, and the two read as two cards again.
+    @ViewBuilder
+    func switcherCardShadow(fold: SwitcherCardFold?) -> some View {
+        if let fold {
+            shadow(color: .black.opacity(0.5), radius: 10, y: 5)
+                .mask {
+                    Rectangle().padding(fold.edge == .trailing
+                        ? EdgeInsets(top: -40, leading: -40, bottom: -40, trailing: 0)
+                        : EdgeInsets(top: -40, leading: 0, bottom: -40, trailing: -40))
+                }
+        } else {
+            shadow(color: .black.opacity(0.5), radius: 10, y: 5)
+        }
+    }
+}
+
 // MARK: - App Switcher Card (with swipe-up-to-close)
 @available(iOS 16.0, *)
 struct AppSwitcherCard: View {
@@ -6739,9 +7250,14 @@ struct AppSwitcherCard: View {
     let cardWidth: CGFloat
     let cardHeight: CGFloat
     let cornerRadius: CGFloat
-    
+
     let cardIndex: Int
-    
+    /// Whether the app's picture is the shape of this card. Where it isn't, the
+    /// card shows the app's icon, as before there is a picture at all.
+    var showsPicture: Bool = true
+    /// Where the other half is, for a card that is one half of a split's.
+    var fold: SwitcherCardFold? = nil
+
     @EnvironmentObject var dockManager: MultitaskDockManager
     @State private var dragOffset: CGFloat = 0
     @State private var isDismissing = false
@@ -6794,7 +7310,7 @@ struct AppSwitcherCard: View {
     private let dismissThreshold: CGFloat = -120
 
     var body: some View {
-        VStack(spacing: 8) {
+        VStack(alignment: fold?.headerAlignment ?? .center, spacing: 8) {
             // App icon + left-aligned name, with the Customize button inline on the
             // trailing edge. Row spans the card width with 10pt side margins: name
             // group sits 10pt from the left, the slider button 10pt from the right.
@@ -6873,7 +7389,7 @@ struct AppSwitcherCard: View {
             
             // Card with snapshot
             ZStack {
-                if let snapshotImage = dockManager.appSnapshotImages[app.appUUID] {
+                if showsPicture, let snapshotImage = dockManager.appSnapshotImages[app.appUUID] {
                     // Frozen bitmap, filling the card. Turned upright for a portrait
                     // card and left alone for a landscape one, so either way it arrives
                     // at roughly the card's own aspect and fill crops only a sliver —
@@ -6898,7 +7414,7 @@ struct AppSwitcherCard: View {
                         .rotationEffect(.radians(Double(turn)))
                         .frame(width: cardWidth, height: cardHeight)
                         .clipped()
-                } else if let snapshotView = dockManager.appSnapshotViews[app.appUUID] {
+                } else if showsPicture, let snapshotView = dockManager.appSnapshotViews[app.appUUID] {
                     SnapshotViewRepresentable(
                         snapshotView: snapshotView,
                         naturalSize: dockManager.appSnapshotSizes[app.appUUID] ?? .zero,
@@ -6927,8 +7443,8 @@ struct AppSwitcherCard: View {
                         }
                 }
             }
-            .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
-            .shadow(color: .black.opacity(0.5), radius: 10, y: 5)
+            .switcherCardClip(cornerRadius: cornerRadius, fold: fold)
+            .switcherCardShadow(fold: fold)
             // Opening the app hangs off the card itself, not off the whole
             // column. It used to include the header row, which is where both
             // controls live: SwiftUI resolves its own gestures before it reaches
@@ -6942,13 +7458,16 @@ struct AppSwitcherCard: View {
                         .onChange(of: geometry.frame(in: .global)) { cardFrame = $0 }
                 }
             )
+            // Told to the dock too: an app kept beside another comes out of its own
+            // card when the other's is pressed (see `restoreSuspendedSplit`).
+            .onChange(of: cardFrame) { dockManager.switcherCardFrames[app.appUUID] = $0 }
             .onTapGesture {
                 UIImpactFeedbackGenerator(style: .soft).impactOccurred()
-                dockManager.dismissAppSwitcher()
                 // Out of the card rather than out of nowhere: it is already
                 // showing the app, at the size and place the user just pressed.
-                let _ = dockManager.bringMultitaskViewToFront(
-                    uuid: app.appUUID,
+                // With the app beside it too, if the two were side by side.
+                dockManager.openFromSwitcherCard(
+                    app.appUUID,
                     fromRect: cardFrame == .zero ? nil : cardFrame,
                     fromRectRadius: cornerRadius
                 )
@@ -7090,10 +7609,142 @@ struct MultitaskHomeIcons: View {
     let darkModeIcon: Bool
     var iconSize: CGFloat = FlekTheme.bottomBarAppIconSize
 
-    var body: some View {
-        ForEach(Array(dockManager.apps.suffix(MultitaskDockManager.homeDockIconCount))) { app in
-            MultitaskHomeIcon(app: app, iconSize: iconSize)
+    /// One place in the dock: an app, or two side by side, which share one.
+    private enum DockItem: Identifiable {
+        case single(DockAppModel)
+        case split(left: DockAppModel, right: DockAppModel)
+
+        var id: String {
+            switch self {
+            case .single(let app): return app.appUUID
+            case .split(let left, let right): return "split:\(left.appUUID)|\(right.appUUID)"
+            }
         }
+    }
+
+    /// The most recent places, oldest first. Two side by side, on the way home
+    /// from the screen or kept from going home, share one where the more recent of
+    /// them would be: they come back together, and they are shown that way.
+    private var dockItems: [DockItem] {
+        let apps = dockManager.apps
+        let count = MultitaskDockManager.homeDockIconCount
+        guard let pair = dockManager.splitPair ?? dockManager.splitSuspended,
+              let leftID = pair.left, let rightID = pair.right,
+              let left = apps.first(where: { $0.appUUID == leftID }),
+              let right = apps.first(where: { $0.appUUID == rightID }),
+              let last = apps.lastIndex(where: { pair.contains($0.appUUID) }) else {
+            return apps.suffix(count).map { .single($0) }
+        }
+        var items: [DockItem] = []
+        for (index, app) in apps.enumerated() {
+            if !pair.contains(app.appUUID) {
+                items.append(.single(app))
+            } else if index == last {
+                items.append(.split(left: left, right: right))
+            }
+        }
+        return Array(items.suffix(count))
+    }
+
+    var body: some View {
+        ForEach(dockItems) { item in
+            switch item {
+            case .single(let app):
+                MultitaskHomeIcon(app: app, iconSize: iconSize)
+            case .split(let left, let right):
+                MultitaskHomeSplitTile(left: left, right: right, iconSize: iconSize)
+            }
+        }
+    }
+}
+
+/// Two apps side by side in one place in the home dock: each app's icon at half
+/// size in one tile, the left app on the left, the way a folder holds its apps.
+/// Pressed, the two come back side by side, the one used last in use; on the way
+/// home each window flies into its own icon here.
+@available(iOS 16.0, *)
+private struct MultitaskHomeSplitTile: View {
+    let left: DockAppModel
+    let right: DockAppModel
+    let iconSize: CGFloat
+    @ObservedObject private var dockManager = MultitaskDockManager.shared
+
+    private var inset: CGFloat { iconSize * 0.1 }
+    private var gap: CGFloat { iconSize * 0.06 }
+    private var miniSize: CGFloat { (iconSize - inset * 2 - gap) / 2 }
+
+    var body: some View {
+        Button {
+            MultitaskDockManager.buttonHaptic()
+            // The one used last, out of its own icon here; the other comes back
+            // beside it (see `restoreSuspendedSplit`).
+            let latest = dockManager.apps.last(where: {
+                $0.appUUID == left.appUUID || $0.appUUID == right.appUUID
+            }) ?? right
+            let _ = dockManager.bringMultitaskViewToFront(
+                uuid: latest.appUUID,
+                fromIcon: latest.springboardItemID.flatMap { dockManager.homeDockIconFrames[$0] }
+            )
+        } label: {
+            HStack(spacing: gap) {
+                MultitaskHomeMiniIcon(app: left, size: miniSize)
+                MultitaskHomeMiniIcon(app: right, size: miniSize)
+            }
+            .frame(width: iconSize, height: iconSize)
+            .background(
+                RoundedRectangle(cornerRadius: MultitaskHomeIcon.cornerRadius, style: .continuous)
+                    .fill(Color.white.opacity(0.22))
+            )
+            .contentShape(RoundedRectangle(cornerRadius: MultitaskHomeIcon.cornerRadius, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("\(left.appName) and \(right.appName)")
+    }
+}
+
+/// One app's icon in a split tile. Like a dock icon of its own, it publishes where
+/// it is, for the app's window to fly into on the way home and to open out of, and
+/// stands aside while the window is in the air.
+@available(iOS 16.0, *)
+private struct MultitaskHomeMiniIcon: View {
+    let app: DockAppModel
+    let size: CGFloat
+    @ObservedObject private var dockManager = MultitaskDockManager.shared
+
+    private var isStandingAside: Bool {
+        app.springboardItemID.map { dockManager.homeDockIconsStandingAside.contains($0) } ?? false
+    }
+
+    var body: some View {
+        Group {
+            if let icon = SwitcherBarContentView.cachedIcon(for: app) {
+                Image(uiImage: icon)
+                    .resizable()
+                    .aspectRatio(contentMode: .fit)
+            } else {
+                Color.gray.opacity(0.3)
+            }
+        }
+        .frame(width: size, height: size)
+        .clipShape(RoundedRectangle(cornerRadius: size * 0.225, style: .continuous))
+        .opacity(isStandingAside ? 0 : 1)
+        .animation(nil, value: isStandingAside)
+        .background(
+            GeometryReader { geometry in
+                Color.clear
+                    .onAppear { publishFrame(geometry.frame(in: .global)) }
+                    .onChange(of: geometry.frame(in: .global)) { publishFrame($0) }
+                    .onChange(of: dockManager.homeStatesBegun) { _ in
+                        publishFrame(geometry.frame(in: .global))
+                    }
+            }
+        )
+    }
+
+    private func publishFrame(_ frame: CGRect) {
+        guard MultitaskDockManager.shared.isHomeState,
+              let itemID = app.springboardItemID, frame.width > 1, frame.height > 1 else { return }
+        MultitaskDockManager.shared.homeDockIconFrames[itemID] = frame
     }
 }
 
@@ -7608,6 +8259,7 @@ struct LoadingIconView: View {
 // MARK: - Quick Switch
 
 /// Where a run of swipes along the bar's app button stands.
+@available(iOS 16.0, *)
 final class MultitaskQuickSwitch {
     /// The running apps, most recent first, as the run's first swipe found them:
     /// the order every swipe of the run walks.
@@ -7670,6 +8322,43 @@ final class MultitaskQuickSwitch {
         }
     }
 
+    /// The shape a swiped window is cut to: the one it has on screen at rest, so
+    /// nothing changes as it starts moving or as it lands. The display's corners
+    /// where the window reaches them; along the bar, the bar's own concave
+    /// corners, which are what round a window there at rest — tighter than the
+    /// display's, a different curve, and none at all for a flat bar.
+    struct Shape {
+        /// The display's radius at each corner, nought at those on the bar's edge.
+        var radii: FlekCornerRadii
+        /// The window's corners that stand on the bar, in its layer's terms.
+        var barCorners: CACornerMask = []
+        /// How far the bar's concave corners reach along each edge.
+        var fillet: CGFloat = 0
+
+        /// The window's outline with the bar's concave corners taken out of it:
+        /// the very curve the bar draws (see `BarTopBar`), run the other way.
+        func filletPath(in size: CGSize) -> CGPath {
+            let c = min(fillet, size.width / 2, size.height / 2)
+            let w = size.width, h = size.height
+            // Each corner, with where its curve starts and ends going round clockwise.
+            let corners: [(CACornerMask, CGPoint, CGPoint, CGPoint)] = [
+                (.layerMinXMinYCorner, CGPoint(x: 0, y: 0), CGPoint(x: 0, y: c), CGPoint(x: c, y: 0)),
+                (.layerMaxXMinYCorner, CGPoint(x: w, y: 0), CGPoint(x: w - c, y: 0), CGPoint(x: w, y: c)),
+                (.layerMaxXMaxYCorner, CGPoint(x: w, y: h), CGPoint(x: w, y: h - c), CGPoint(x: w - c, y: h)),
+                (.layerMinXMaxYCorner, CGPoint(x: 0, y: h), CGPoint(x: c, y: h), CGPoint(x: 0, y: h - c)),
+            ]
+            let path = CGMutablePath()
+            for (index, (mask, corner, before, after)) in corners.enumerated() {
+                let rounded = c > 0 && barCorners.contains(mask)
+                let start = rounded ? before : corner
+                if index == 0 { path.move(to: start) } else { path.addLine(to: start) }
+                if rounded { path.addQuadCurve(to: after, control: corner) }
+            }
+            path.closeSubpath()
+            return path
+        }
+    }
+
     /// A window's corners as they were before a swipe rounded them, put back as
     /// it comes to rest. A guest window clips to its bounds already; a built-in
     /// page doesn't.
@@ -7681,19 +8370,30 @@ final class MultitaskQuickSwitch {
         let mask: CALayer?
         let cut: CALayer?
 
-        /// Rounds `layer`'s corners to `radii`, on the curve the screen's own
-        /// corners follow, and returns how it was. Alike all round, by the layer's
-        /// own corner radius; otherwise by a mask, a layer rounding only one side.
-        static func clip(_ layer: CALayer, radii: FlekCornerRadii) -> Corners {
-            guard radii != .uniform(radii.topLeft) else {
+        /// Cuts `layer` to `shape` and returns how it was. Rounded alike all round,
+        /// by the layer's own corner radius, on the curve the screen's own corners
+        /// follow. Otherwise by a mask: a layer for each group of corners rounded
+        /// alike (see `FlekCornerRadii.cut`), and last the bar's concave corners.
+        static func clip(_ layer: CALayer, shape: Shape) -> Corners {
+            let radii = shape.radii
+            let filleted = !shape.barCorners.isEmpty && shape.fillet > 0
+            if !filleted, radii == .uniform(radii.topLeft) {
                 let was = Corners(masksToBounds: layer.masksToBounds, curve: layer.cornerCurve, mask: nil, cut: nil)
                 layer.masksToBounds = true
                 layer.cornerCurve = .continuous
                 layer.cornerRadius = radii.topLeft
                 return was
             }
-            let cut = FlekCornerRadii.cut(size: layer.bounds.size, from: radii, to: radii)[0].layer
+            let size = layer.bounds.size
+            let parts = FlekCornerRadii.cut(size: size, from: radii, to: radii).map(\.layer)
+            let cut = parts[0]
             cut.position = CGPoint(x: layer.bounds.midX, y: layer.bounds.midY)
+            if filleted, let last = parts.last {
+                let fillet = CAShapeLayer()
+                fillet.frame = CGRect(origin: .zero, size: size)
+                fillet.path = shape.filletPath(in: size)
+                last.mask = fillet
+            }
             let was = Corners(masksToBounds: layer.masksToBounds, curve: layer.cornerCurve, mask: layer.mask, cut: cut)
             layer.mask = cut
             return was
@@ -7717,8 +8417,6 @@ final class MultitaskQuickSwitch {
         /// How far apart the window in front and the one coming in are kept: a
         /// screen's length, and a little space between the two.
         var spacing: CGFloat { extent + 20 }
-        /// The screen's corners, which the windows keep for the whole swipe.
-        let cornerRadii: FlekCornerRadii
         let currentCorners: Corners
         /// Which side the incoming app was brought out on: 1 for the app before,
         /// coming in from the start of the bar, -1 for the one after.
@@ -7740,13 +8438,27 @@ final class MultitaskQuickSwitch {
         /// stage while windows were still moving, and putting the other apps
         /// away for it waits until they rest.
         var caughtLanding = false
+        /// Two side by side are one stop along the bar, as a pair in Split View
+        /// is on iPad: the window in front's partner, moving with it, and the two
+        /// it belongs to, kept for coming back to once the swipe lands elsewhere.
+        var currentPartner: UIView?
+        var currentPartnerCorners: Corners?
+        var currentPair: MultitaskDockManager.SplitPair?
+        /// The same for a pair kept from going home coming in: the incoming
+        /// window's partner, how it was, and the two, side by side again once
+        /// the swipe lands on them.
+        var targetPartner: UIView?
+        var targetPartnerWasHidden = false
+        var targetPartnerAlpha: CGFloat = 1
+        var targetPartnerIndex: Int?
+        var targetPartnerCorners: Corners?
+        var targetPair: MultitaskDockManager.SplitPair?
 
         init(current: UIView, axis: CGVector, extent: CGFloat,
-             cornerRadii: FlekCornerRadii, currentCorners: Corners) {
+             currentCorners: Corners) {
             self.current = current
             self.axis = axis
             self.extent = extent
-            self.cornerRadii = cornerRadii
             self.currentCorners = currentCorners
         }
     }
@@ -7780,8 +8492,19 @@ extension MultitaskDockManager {
     /// switcher open, a window flying into or out of its icon.
     func quickSwitchBegan() -> Bool {
         let run = quickSwitch
+        // Two side by side move as one, as a pair in Split View does on iPad. Not
+        // one app beside the apps to choose from, which is a choice still open.
+        let pairOnScreen = isSplitShowing ? splitPair : nil
         guard run.drag == nil, !isHomeState, !isAppSwitcherOpen,
+              pairOnScreen.map({ $0.left != nil && $0.right != nil }) ?? true,
+              !splitLiftArmed, splitLift == nil,
               !windowHostingView.backdropSuspended else { return false }
+        // Two windows sliding as one are left to land before the next swipe:
+        // taken over mid-way, each would need catching where it had got to.
+        if let settle = run.settling,
+           settle.drag.currentPartner != nil || settle.drag.targetPartner != nil {
+            return false
+        }
         var caught: UIView?
         var caughtLanding = false
         if let settle = run.settling {
@@ -7828,15 +8551,32 @@ extension MultitaskDockManager {
         let offset = caught === current
             ? current.transform.tx * axis.dx + current.transform.ty * axis.dy : 0
         if offset == 0 { current.transform = .identity }
+        // The app beside it, where two share the screen, goes with it.
+        var partner: UIView?
+        if let pair = pairOnScreen {
+            guard let partnerUUID = pair.members.first(where: { $0 != uuid }),
+                  let view = splitWindow(of: partnerUUID), view.superview === host,
+                  !view.isHidden, view.alpha > 0.1 else { return false }
+            captureSnapshot(for: partnerUUID)
+            view.layer.removeAllAnimations()
+            view.transform = .identity
+            partner = view
+        }
         // Shaped like the screen from the first moment of the swipe until the
-        // window is back at rest, as iOS shows an app being swiped.
-        let cornerRadii = deviceScreenCornerRadii
+        // window is back at rest, as iOS shows an app being swiped; beside
+        // another, like its side of it.
         let drag = MultitaskQuickSwitch.Drag(current: current, axis: axis, extent: extent,
-                                             cornerRadii: cornerRadii,
-                                             currentCorners: .clip(current.layer, radii: cornerRadii))
+                                             currentCorners: .clip(current.layer, shape: quickSwitchShape(of: current)))
         drag.caughtLanding = caughtLanding && caught === current
+        if let pair = pairOnScreen, let partner {
+            drag.currentPair = pair
+            drag.currentPartner = partner
+            drag.currentPartnerCorners = .clip(partner.layer, shape: quickSwitchShape(of: partner))
+        }
         run.drag = drag
-        showBlurredSpringboard(behind: current, in: host)
+        showBlurredSpringboard(behind: current, keeping: partner, in: host)
+        // The divider and the handles step aside while the two are moving.
+        if partner != nil { syncSplitChrome() }
         if offset != 0 {
             // The app beside it, on the side it has uncovered, comes back out
             // where it was, and the finger takes the two on from there.
@@ -7863,15 +8603,26 @@ extension MultitaskDockManager {
         let position = drag.origin + translation
         let side: CGFloat = position > 0 ? 1 : (position < 0 ? -1 : drag.side)
         if side != drag.side { bringOutQuickSwitchTarget(on: side, for: drag) }
-        if let target = drag.target {
-            place(drag.current, at: position, along: drag)
-            place(target, at: position - side * drag.spacing, along: drag)
+        if drag.target != nil {
+            placeCurrent(of: drag, at: position)
+            placeTarget(of: drag, at: position - side * drag.spacing)
         } else {
             // No app that way: the window only gives a little, as a scroll view
             // does pulled past its end.
-            place(drag.current, at: Self.quickSwitchRubberBand(position, extent: drag.extent),
-                  along: drag)
+            placeCurrent(of: drag, at: Self.quickSwitchRubberBand(position, extent: drag.extent))
         }
+    }
+
+    /// The window in front, and the app beside it where two share the screen.
+    private func placeCurrent(of drag: MultitaskQuickSwitch.Drag, at offset: CGFloat) {
+        place(drag.current, at: offset, along: drag)
+        if let partner = drag.currentPartner { place(partner, at: offset, along: drag) }
+    }
+
+    /// The window coming in, and its partner where it is one of two kept.
+    private func placeTarget(of drag: MultitaskQuickSwitch.Drag, at offset: CGFloat) {
+        if let target = drag.target { place(target, at: offset, along: drag) }
+        if let partner = drag.targetPartner { place(partner, at: offset, along: drag) }
     }
 
     /// `velocity` is the finger's along the bar as it lifted, in points a second.
@@ -7906,13 +8657,62 @@ extension MultitaskDockManager {
         UIView.animate(withDuration: 0.4, delay: 0, usingSpringWithDamping: 1,
                        initialSpringVelocity: min(abs(velocity) / remaining, 30),
                        options: [.beginFromCurrentState, .allowUserInteraction]) {
-            self.place(drag.current, at: drag.side * drag.spacing, along: drag)
+            self.placeCurrent(of: drag, at: drag.side * drag.spacing)
             target.transform = .identity
+            drag.targetPartner?.transform = .identity
         } completion: { _ in
             // Unless the next swipe caught it on the way, which has seen to it.
             guard self.quickSwitch.settling === settle else { return }
             self.finishQuickSwitch(settle, caught: false)
         }
+    }
+
+    /// The shape `view` has at rest, which it keeps for the whole swipe: the
+    /// display's corners, but for those on the bar's edge when the window stops
+    /// at the bar, which take the bar's own concave corners. A window reaching
+    /// in under the bar, as a built-in page does, keeps the display's there:
+    /// the bar covers them.
+    private func quickSwitchShape(of view: UIView) -> MultitaskQuickSwitch.Shape {
+        var shape = MultitaskQuickSwitch.Shape(radii: deviceScreenCornerRadii)
+        // Beside another app, the corners on the fold's side are the fold's own,
+        // as the divider rounds them at rest.
+        if let uuid = apps.first(where: { $0.view === view })?.appUUID,
+           let side = framedSplitPair?.side(of: uuid) {
+            let fold = SplitDividerView.cornerRadius
+            switch side {
+            case .left:
+                shape.radii.topRight = fold
+                shape.radii.bottomRight = fold
+            case .right:
+                shape.radii.topLeft = fold
+                shape.radii.bottomLeft = fold
+            }
+        }
+        let insets = barReservedInsets
+        guard insets != .zero, let window = view.window else { return shape }
+        // The window's place at rest: its transform moves it only along the bar.
+        let resting = CGRect(x: view.center.x - view.bounds.width / 2,
+                             y: view.center.y - view.bounds.height / 2,
+                             width: view.bounds.width, height: view.bounds.height)
+        let frame = view.superview?.convert(resting, to: window) ?? resting
+        let flatTop = window.bounds.inset(by: insets)
+        let slack: CGFloat = 1
+        if insets.bottom > 0, frame.maxY <= flatTop.maxY + slack {
+            shape.barCorners = [.layerMinXMaxYCorner, .layerMaxXMaxYCorner]
+        } else if insets.top > 0, frame.minY >= flatTop.minY - slack {
+            shape.barCorners = [.layerMinXMinYCorner, .layerMaxXMinYCorner]
+        } else if insets.right > 0, frame.maxX <= flatTop.maxX + slack {
+            shape.barCorners = [.layerMaxXMinYCorner, .layerMaxXMaxYCorner]
+        } else if insets.left > 0, frame.minX >= flatTop.minX - slack {
+            shape.barCorners = [.layerMinXMinYCorner, .layerMinXMaxYCorner]
+        }
+        guard !shape.barCorners.isEmpty else { return shape }
+        if shape.barCorners.contains(.layerMinXMinYCorner) { shape.radii.topLeft = 0 }
+        if shape.barCorners.contains(.layerMaxXMinYCorner) { shape.radii.topRight = 0 }
+        if shape.barCorners.contains(.layerMinXMaxYCorner) { shape.radii.bottomLeft = 0 }
+        if shape.barCorners.contains(.layerMaxXMaxYCorner) { shape.radii.bottomRight = 0 }
+        shape.fillet = barLedgeActive ? barCornerRadiusActive * barLedgeAmountActive : 0
+        return shape
     }
 
     private func place(_ view: UIView, at offset: CGFloat, along drag: MultitaskQuickSwitch.Drag) {
@@ -7934,7 +8734,9 @@ extension MultitaskDockManager {
         var index = run.index + step
         var found: (uuid: String, view: UIView)?
         while found == nil, run.order.indices.contains(index) {
-            if let view = apps.first(where: { $0.appUUID == run.order[index] })?.view,
+            // The app beside the one in front is moving with it, not a stop.
+            if drag.currentPair?.contains(run.order[index]) != true,
+               let view = apps.first(where: { $0.appUUID == run.order[index] })?.view,
                view.superview === host, !isInPiP(view) {
                 found = (run.order[index], view)
             }
@@ -7945,18 +8747,47 @@ extension MultitaskDockManager {
         drag.targetAlpha = view.alpha
         drag.targetIndex = host.subviews.firstIndex(of: view)
         view.layer.removeAllAnimations()
-        drag.targetCorners = .clip(view.layer, radii: drag.cornerRadii)
+        drag.targetCorners = .clip(view.layer, shape: quickSwitchShape(of: view))
         // Just under the window it comes in beside, so nothing else that was
         // behind that one covers it on the way.
         host.insertSubview(view, belowSubview: drag.current)
-        place(view, at: -side * drag.spacing, along: drag)
         view.alpha = 1
         view.isHidden = false
         drag.target = view
         drag.targetUUID = uuid
+        // One of two kept from going home comes in with the other beside it, in
+        // their places, to be side by side again where the swipe lands.
+        if canSplitNow, let kept = splitSuspended, kept.contains(uuid),
+           let partnerUUID = kept.members.first(where: { $0 != uuid }),
+           let partner = splitWindow(of: partnerUUID), partner.superview === host,
+           !isInPiP(partner) {
+            drag.targetPartnerWasHidden = partner.isHidden
+            drag.targetPartnerAlpha = partner.alpha
+            drag.targetPartnerIndex = host.subviews.firstIndex(of: partner)
+            partner.layer.removeAllAnimations()
+            drag.targetPartnerCorners = .clip(partner.layer, shape: quickSwitchShape(of: partner))
+            host.insertSubview(partner, belowSubview: drag.current)
+            partner.alpha = 1
+            partner.isHidden = false
+            drag.targetPartner = partner
+            drag.targetPair = kept
+        }
+        placeTarget(of: drag, at: -side * drag.spacing)
     }
 
     private func putBackQuickSwitchTarget(of drag: MultitaskQuickSwitch.Drag) {
+        if let partner = drag.targetPartner {
+            partner.transform = .identity
+            drag.targetPartnerCorners?.restore(partner.layer)
+            partner.alpha = drag.targetPartnerAlpha
+            partner.isHidden = drag.targetPartnerWasHidden
+            if let index = drag.targetPartnerIndex, let host = partner.superview {
+                host.insertSubview(partner, at: min(index, host.subviews.count - 1))
+            }
+        }
+        drag.targetPartner = nil
+        drag.targetPartnerCorners = nil
+        drag.targetPair = nil
         guard let view = drag.target else { return }
         view.transform = .identity
         drag.targetCorners?.restore(view.layer)
@@ -7977,9 +8808,8 @@ extension MultitaskDockManager {
                        initialSpringVelocity: 0,
                        options: [.beginFromCurrentState, .allowUserInteraction]) {
             drag.current.transform = .identity
-            if let target = drag.target {
-                self.place(target, at: -drag.side * drag.spacing, along: drag)
-            }
+            drag.currentPartner?.transform = .identity
+            self.placeTarget(of: drag, at: -drag.side * drag.spacing)
         } completion: { _ in
             guard self.quickSwitch.settling === settle else { return }
             self.finishQuickSwitch(settle, caught: false)
@@ -8013,47 +8843,78 @@ extension MultitaskDockManager {
         guard let (target, uuid) = settle.landing else {
             // Back where it was, and the window brought out goes back to how it was.
             drag.currentCorners.restore(drag.current.layer)
+            if let partner = drag.currentPartner { drag.currentPartnerCorners?.restore(partner.layer) }
             putBackQuickSwitchTarget(of: drag)
+            // Two back side by side: the divider and the handles come back.
+            if drag.currentPartner != nil { syncSplitChrome() }
             guard !caught else { return }
             hideBlurredSpringboard()
             if drag.caughtLanding { keepOneAppOnStage(drag.current) }
             return
         }
+        let partner = drag.targetPartner
+        let partnerUUID = partner == nil ? nil : drag.targetPair?.members.first(where: { $0 != uuid })
         // In front of the window it replaced, which goes back to its place behind
-        // it, as a window brought forward leaves the rest.
+        // it, as a window brought forward leaves the rest. Two kept come in front
+        // together, the one landed on the one in use.
+        if let partner { partner.superview?.bringSubviewToFront(partner) }
         target.superview?.bringSubviewToFront(target)
         drag.current.transform = .identity
         drag.currentCorners.restore(drag.current.layer)
+        if let left = drag.currentPartner {
+            left.transform = .identity
+            drag.currentPartnerCorners?.restore(left.layer)
+        }
         drag.targetCorners?.restore(target.layer)
+        if let partner { drag.targetPartnerCorners?.restore(partner.layer) }
         // The windows further back come back in, under the one now in front.
-        quickSwitch.springboard?.fadedWindows.removeAll { $0.view === target }
+        quickSwitch.springboard?.fadedWindows.removeAll { $0.view === target || $0.view === partner }
         if !caught { hideBlurredSpringboard() }
         // Closed while it was coming in: nothing to hand the stage to, and the
         // button goes back to naming the app in front.
         guard apps.contains(where: { $0.appUUID == uuid }) else {
             withAnimation(Self.quickSwitchLabelAnimation) { quickSwitchLanding = nil }
             quickSwitchLandingSide = nil
+            if drag.currentPartner != nil { syncSplitChrome() }
             return
         }
 
+        // Two side by side swiped away are kept, in their places, to come back
+        // to, as going home keeps them (see `framedSplitPair`). Two kept, swiped
+        // back to, are side by side again.
+        if let pair = drag.currentPair, splitPair == pair {
+            splitSuspended = pair
+            splitPair = nil
+            splitLaunch = nil
+        }
+        if let pair = drag.targetPair, partner != nil, splitSuspended == pair {
+            splitSuspended = nil
+            splitPair = pair
+        }
+
         passURLSchemeToView(target)
-        for other in apps where other.appUUID != uuid {
+        for other in apps where other.appUUID != uuid && other.appUUID != partnerUUID {
             dismissPresentation(forAppUUID: other.appUUID)
         }
         // Not while the next swipe has the windows: it is about to bring back out
         // the one this would put away. That swipe does it as its windows rest.
-        if !caught { keepOneAppOnStage(target) }
+        // Nor for two side by side, which would put one of them away.
+        if !caught, partner == nil { keepOneAppOnStage(target) }
         if let window = keyWindow { bringViewToFront(target, in: window) }
         windowTookStage(uuid: uuid)
         // Named since the finger let go; from here as the app in front.
         quickSwitchLanding = nil
         quickSwitchLandingSide = nil
+        // The divider and the handles, now that the windows are at rest.
+        syncSplitChrome()
 
         // The order iOS leaves after a run: the app landed on is the most recent,
-        // and the rest stay as the run found them, however many it passed.
+        // and the rest stay as the run found them, however many it passed. Two
+        // landed on are the two most recent, the one in use the last.
         let run = quickSwitch
         var oldestFirst = Array(run.order.reversed())
-        oldestFirst.removeAll { $0 == uuid }
+        oldestFirst.removeAll { $0 == uuid || $0 == partnerUUID }
+        if let partnerUUID { oldestFirst.append(partnerUUID) }
         oldestFirst.append(uuid)
         let byUUID = Dictionary(apps.map { ($0.appUUID, $0) }, uniquingKeysWith: { first, _ in first })
         let reordered = oldestFirst.compactMap { byUUID[$0] }
@@ -8154,7 +9015,10 @@ extension MultitaskDockManager {
     /// Lays the blurred springboard under the windows as a swipe starts and hides
     /// the ones behind `current`. One still fading away after the swipe before is
     /// brought back instead.
-    private func showBlurredSpringboard(behind current: UIView, in host: UIView) {
+    /// `partner` is the app beside `current` where two share the screen, which
+    /// moves with it and stays in view as it does.
+    private func showBlurredSpringboard(behind current: UIView, keeping partner: UIView? = nil,
+                                        in host: UIView) {
         let run = quickSwitch
         // Before it is laid, so what is drawn is the springboard alone.
         let image = quickSwitchSpringboardImage()
@@ -8171,9 +9035,9 @@ extension MultitaskDockManager {
         }
         springboard.generation += 1
         springboard.imageView.image = image
-        springboard.fadedWindows.removeAll { $0.view === current }
+        springboard.fadedWindows.removeAll { $0.view === current || $0.view === partner }
         let windows = Set(apps.compactMap(\.view).map(ObjectIdentifier.init))
-        for view in host.subviews where view !== current
+        for view in host.subviews where view !== current && view !== partner
             && windows.contains(ObjectIdentifier(view)) && !view.isHidden && view.alpha > 0
             && !isInPiP(view) && !springboard.fadedWindows.contains(where: { $0.view === view }) {
             springboard.fadedWindows.append((view, view.alpha))
@@ -8309,4 +9173,1841 @@ private struct QuickSwitchSwipe: ViewModifier {
 private final class QuickSwitchSwipeReading {
     var isSwitching: Bool?
     var origin: CGFloat = 0
+}
+
+// MARK: - Two apps side by side (iPhone Duo, opened out)
+
+/// Two apps side by side on an iPhone Duo opened out, one on each side of the
+/// fold, the way iOS itself does it there. Each has a page about the size of the
+/// cover display, which an app laid out for a phone already fits, and the fold
+/// never runs through either app.
+///
+/// Started as iOS starts it:
+/// - from an app: the app button, held and then dragged, lifts the app in use off
+///   the screen, and a shelf comes up at each side to drop it on. It takes the
+///   side it is dropped on, and the other side shows the apps to choose the
+///   second from;
+/// - from the home screen: an app's menu has "Open in Split View", which opens it
+///   on the left with the apps to choose from on the right.
+///
+/// Once two are side by side, as with iOS's three home indicators, each app has a
+/// handle of its own under it, and the bar's controls act on the two together:
+/// - a side's handle, swiped up or tapped, puts that side's app away and shows the
+///   apps to choose from there;
+/// - the app in use, lifted and dropped on the other side, swaps sides;
+/// - the divider, dragged off either edge, puts that side's app away and leaves
+///   the other the screen. Tapped, it pairs the two: opening either opens both
+///   from then on, until the divider parts them again.
+///
+/// Over when either app is put away or closed, when a third comes forward, on the
+/// way home. Folded, or turned upright while open, the app last used fills the
+/// screen, and the two are side by side again once the phone is opened out or
+/// turned back. Gone home from, the two come back together however either is
+/// opened again, until the divider parts them or one is closed.
+///
+/// Each app is told its page's size and keeps the screen's orientation, as an app
+/// in an iPad's Split View does: on the inner display, held open, that is
+/// landscape, whatever shape the page.
+@available(iOS 16.0, *)
+extension MultitaskDockManager {
+    struct SplitPair: Equatable {
+        /// The app on each side, or nil where that side shows the apps to choose
+        /// from.
+        var left: String?
+        var right: String?
+
+        var members: [String] { [left, right].compactMap { $0 } }
+
+        func contains(_ uuid: String) -> Bool { left == uuid || right == uuid }
+
+        func side(of uuid: String) -> SplitSide? {
+            uuid == left ? .left : uuid == right ? .right : nil
+        }
+
+        func app(on side: SplitSide) -> String? { side == .left ? left : right }
+
+        /// The side showing the apps to choose from, if one is.
+        var choosingSide: SplitSide? { left == nil ? .left : right == nil ? .right : nil }
+
+        func with(_ uuid: String?, on side: SplitSide) -> SplitPair {
+            var pair = self
+            if side == .left { pair.left = uuid } else { pair.right = uuid }
+            return pair
+        }
+
+        var swapped: SplitPair { SplitPair(left: right, right: left) }
+
+        static let empty = SplitPair(left: nil, right: nil)
+    }
+
+    enum SplitSide: CaseIterable {
+        case left, right
+
+        var opposite: SplitSide { self == .left ? .right : .left }
+    }
+
+    /// An app chosen for a side that has yet to start: its window takes the side
+    /// when it arrives, out of the icon it was chosen by.
+    struct SplitLaunch {
+        let side: SplitSide
+        let itemID: String
+        let source: CGRect?
+        let started = Date()
+
+        /// Long after, a window arriving is an app opened some other way.
+        var isFresh: Bool { Date().timeIntervalSince(started) < 30 }
+    }
+
+    /// The app in use, lifted off the screen by the app button.
+    final class SplitLift {
+        let uuid: String
+        let view: UIView
+        /// Where the window's centre was as it lifted.
+        let center: CGPoint
+        /// Where the finger came down.
+        let start: CGPoint
+        var target: SplitSide?
+        /// How the window clipped before its corners were rounded for the lift: a
+        /// guest window clips to its bounds already, a built-in page doesn't.
+        let masksToBounds: Bool
+        let cornerCurve: CALayerCornerCurve
+        /// With two side by side: the side this one was on, and the window of the
+        /// app on the other side, moved across to show the swap while the finger
+        /// is over its side.
+        let from: SplitSide?
+        let otherView: UIView?
+        var previewing = false
+
+        init(uuid: String, view: UIView, center: CGPoint, start: CGPoint,
+             from: SplitSide?, otherView: UIView?) {
+            self.uuid = uuid
+            self.view = view
+            self.center = center
+            self.start = start
+            self.from = from
+            self.otherView = otherView
+            masksToBounds = view.layer.masksToBounds
+            cornerCurve = view.layer.cornerCurve
+        }
+
+        /// Square-cornered again, the way a window rests: the screen's corners and
+        /// the divider round it where it lands.
+        func restoreCorners() {
+            view.layer.cornerRadius = 0
+            view.layer.masksToBounds = masksToBounds
+            view.layer.cornerCurve = cornerCurve
+        }
+    }
+
+    /// The black between the two pages.
+    static let splitGap: CGFloat = 8
+    /// How quickly what is drawn around the two goes as they leave. The windows
+    /// are three fifths of the way into their icons a tenth of a second after
+    /// setting off; faded over 0.15s, the divider was still half there over
+    /// windows nearly gone.
+    static let splitChromeFadeOut: TimeInterval = 0.1
+    /// Narrower than this, a side would be narrower than any phone an app is laid
+    /// out for.
+    static let splitMinimumWidth: CGFloat = 640
+    /// How far an app shrinks as it is lifted.
+    static let splitLiftScale: CGFloat = 0.5
+    private static let splitPairsKey = "FlekSplitPairs"
+    private static let splitIconCache = NSCache<NSString, UIImage>()
+
+    /// Whether the display FlekDeck is on has room for two apps side by side:
+    /// the iPhone Duo's inner one.
+    var isSplitDisplay: Bool {
+        guard let screen = (windowHostingView.window ?? keyWindow)?.windowScene?.screen else {
+            return false
+        }
+        #if DEBUG
+        // Folding can't be driven from the simulator's command-line tools, so a
+        // test can launch FlekDeck with `-FlekSplitOnAnyDisplay YES` and get the
+        // split on any display wide enough.
+        if UserDefaults.standard.bool(forKey: "FlekSplitOnAnyDisplay") { return true }
+        #endif
+        return FlekDeviceModel.duoDisplay(of: screen) == .inner
+    }
+
+    private var splitHostSize: CGSize {
+        windowHostingView.window?.bounds.size ?? windowHostingView.bounds.size
+    }
+
+    /// Whether two apps can be put side by side now: apps open in windows, on the
+    /// inner display, held open, wider than it is tall.
+    var canSplitNow: Bool {
+        guard isDockEnabled(), DataManager.shared.model.multiLCStatus != 2, isSplitDisplay else {
+            return false
+        }
+        let size = splitHostSize
+        return size.width > size.height && size.width >= Self.splitMinimumWidth
+    }
+
+    /// Whether the two are drawn side by side now. Turned upright, or while the
+    /// switcher has turned the display, each has the whole screen until it is
+    /// wide again.
+    var isSplitShowing: Bool { splitPair != nil && canSplitNow }
+
+    /// The page `uuid`'s window has, in the window host's coordinates, or null
+    /// while it has the whole screen. Asked by a guest window each time it is
+    /// framed, so it is the one place that decides.
+    @objc public func splitPaneFrame(forAppUUID uuid: String) -> CGRect {
+        guard let side = framedSplitPair?.side(of: uuid) else { return .null }
+        return splitPaneFrame(side)
+    }
+
+    /// The two whose windows are framed side by side: the two on screen, or two
+    /// kept from going home, put away in their places so they come back as they
+    /// were, and so a swipe along the bar can bring them in together. Neither
+    /// where there is no room for two.
+    private var framedSplitPair: SplitPair? {
+        guard canSplitNow else { return nil }
+        return splitPair ?? splitSuspended
+    }
+
+    private func splitPaneFrame(_ side: SplitSide) -> CGRect {
+        let bounds = CGRect(origin: .zero, size: splitHostSize)
+        let area = bounds.inset(by: barReservedInsets)
+        // The fold runs down the middle of the display.
+        let fold = bounds.midX
+        let half = Self.splitGap / 2
+        switch side {
+        case .left:
+            return CGRect(x: area.minX, y: area.minY,
+                          width: max(fold - half - area.minX, 0), height: area.height)
+        case .right:
+            return CGRect(x: fold + half, y: area.minY,
+                          width: max(area.maxX - fold - half, 0), height: area.height)
+        }
+    }
+
+    /// A side's page less the safe area on the screen edges it reaches: where its
+    /// app's content is, clear of the status bar's column.
+    private func splitContentFrame(_ side: SplitSide) -> CGRect {
+        var frame = splitPaneFrame(side)
+        let bounds = CGRect(origin: .zero, size: splitHostSize)
+        let safe = windowHostingView.window?.safeAreaInsets ?? .zero
+        if frame.minX <= bounds.minX + 1 {
+            frame.origin.x += safe.left
+            frame.size.width -= safe.left
+        }
+        if frame.maxX >= bounds.maxX - 1 {
+            frame.size.width -= safe.right
+        }
+        return frame
+    }
+
+    private func splitWindow(of uuid: String) -> UIView? {
+        apps.first { $0.appUUID == uuid }?.view
+    }
+
+    /// The home screen item an open app belongs to.
+    private func splitItemID(of uuid: String) -> String? {
+        apps.first { $0.appUUID == uuid }?.springboardItemID
+    }
+
+    private func runningApp(forItemID itemID: String) -> DockAppModel? {
+        apps.first { $0.springboardItemID == itemID }
+    }
+
+    /// A built-in page's frame beside another app. A page runs under the bar and
+    /// keeps its own content clear of it, where a guest window stops short of the
+    /// bar's strip, so the page's side of the fold is carried out to the screen's
+    /// own edges.
+    private func splitPageFrame(forAppUUID uuid: String) -> CGRect? {
+        let pane = splitPaneFrame(forAppUUID: uuid)
+        guard !pane.isNull, let side = framedSplitPair?.side(of: uuid) else { return nil }
+        let bounds = CGRect(origin: .zero, size: splitHostSize)
+        let minX = side == .left ? bounds.minX : pane.minX
+        let maxX = side == .right ? bounds.maxX : pane.maxX
+        return CGRect(x: minX, y: bounds.minY, width: maxX - minX, height: bounds.height)
+    }
+
+    /// Whether a built-in page reaches the screen's `edge`, where the bar may
+    /// stand: always, unless it is beside another app with the fold on that side.
+    private func pageReachesEdge(_ controller: UIViewController, _ edge: ScreenEdge) -> Bool {
+        guard let uuid = internalPageControllers.first(where: { $0.value === controller })?.key,
+              let side = framedSplitPair?.side(of: uuid) else { return true }
+        switch edge {
+        case .left: return side == .left
+        case .right: return side == .right
+        default: return true
+        }
+    }
+
+    // MARK: Starting from the home screen
+
+    /// The home screen's "Open in Split View": the app opens on the left, and the
+    /// apps to choose the second from on the right.
+    func openInSplitView(_ item: FlekHomeItem) {
+        guard canSplitNow else { return }
+        endSplit()
+        if let running = runningApp(forItemID: item.id) {
+            splitPair = SplitPair.empty.with(running.appUUID, on: .left)
+            relayoutSplitWindow(of: running.appUUID, animated: false)
+            syncSplitChrome()
+            _ = bringMultitaskViewToFront(uuid: running.appUUID)
+        } else {
+            splitLaunch = SplitLaunch(side: .left, itemID: item.id, source: nil)
+            splitOpenHomeItem?(item)
+        }
+    }
+
+    /// A window arriving for an app chosen for a side: it opens onto that side,
+    /// out of the icon it was chosen by. False for any other window, which takes
+    /// the whole screen as usual.
+    func takeArrivingWindowIntoSplit(_ model: DockAppModel) -> Bool {
+        guard let launch = splitLaunch, splitLaunch(launch, matches: model) else { return false }
+        splitLaunch = nil
+        splitPickerModel.launchingID = nil
+        let pair = splitPair ?? .empty
+        guard launch.isFresh, canSplitNow, pair.app(on: launch.side) == nil else { return false }
+        apps.append(model)
+        splitPair = pair.with(model.appUUID, on: launch.side)
+        frontmostAppUUID = model.appUUID
+        isHomeState = false
+        relayoutSplitWindow(of: model.appUUID, animated: false)
+        syncSplitChrome()
+        if let view = model.view {
+            LCMinimizeToIconAnimator.expand(view, fromItemID: model.springboardItemID,
+                                            sourceInWindow: launch.source,
+                                            sourceCornerRadius: launch.source == nil ? nil : SplitAppPicker.iconCornerRadius)
+        }
+        if !isVisible {
+            showDock()
+        } else {
+            updateDockFrame()
+            applyPreferredControl()
+        }
+        ensureControlAccessible()
+        return true
+    }
+
+    /// Whether `model` is the app `launch` is waiting for: by the home screen
+    /// item it belongs to, or failing that, by its data. An app's record can be
+    /// found by the dock other than through the home screen's own, which names it
+    /// by another path; its data is still where the home screen's record says.
+    private func splitLaunch(_ launch: SplitLaunch, matches model: DockAppModel) -> Bool {
+        if launch.itemID == model.springboardItemID { return true }
+        guard let item = splitHomeItems?().first(where: { $0.id == launch.itemID }),
+              case .installed(let app) = item else { return false }
+        return app.appInfo.containers.contains { $0.folderName == model.appUUID }
+    }
+
+    // MARK: The apps to choose from
+
+    /// Keeps the apps to choose from on the side with no app.
+    private func syncSplitPicker(shown: Bool) {
+        guard shown, let pair = splitPair, let side = pair.choosingSide,
+              let host = windowHostingView.superview else {
+            removeSplitPicker()
+            return
+        }
+        let entries = splitPickerEntries(excluding: pair.app(on: side.opposite))
+        if splitPickerModel.entries != entries { splitPickerModel.entries = entries }
+        let frame = windowHostingView.convert(splitPaneFrame(side), to: host)
+        if let picker = splitPicker {
+            picker.view.frame = frame
+            return
+        }
+        let picker = UIHostingController(rootView: AnyView(
+            SplitAppPicker(model: splitPickerModel) { [weak self] itemID, source in
+                self?.splitPickerChose(itemID, from: source)
+            }
+        ))
+        picker.view.backgroundColor = .black
+        picker.view.frame = frame
+        picker.view.alpha = 0
+        let parent = keyWindow?.rootViewController
+        parent?.addChild(picker)
+        host.addSubview(picker.view)
+        if let parent { picker.didMove(toParent: parent) }
+        splitPicker = picker
+        arrangeSplitChrome()
+        UIView.animate(withDuration: 0.25, delay: 0, options: [.allowUserInteraction]) {
+            picker.view.alpha = 1
+        }
+    }
+
+    private func removeSplitPicker() {
+        guard let picker = splitPicker else { return }
+        splitPicker = nil
+        splitPickerModel.launchingID = nil
+        UIView.animate(withDuration: 0.2, animations: {
+            picker.view.alpha = 0
+        }, completion: { _ in
+            picker.willMove(toParent: nil)
+            picker.view.removeFromSuperview()
+            picker.removeFromParent()
+        })
+    }
+
+    /// The home screen's apps and built-in pages, in its order, less the app on
+    /// the other side. Open ones are marked: they are the side's switcher too.
+    private func splitPickerEntries(excluding uuid: String?) -> [SplitPickerModel.Entry] {
+        let excluded = uuid.flatMap { splitItemID(of: $0) }
+        let running = Set(apps.compactMap(\.springboardItemID))
+        let darkIcons = LCUtils.appGroupUserDefault.bool(forKey: "darkModeIcon")
+        return (splitHomeItems?() ?? []).compactMap { item in
+            guard item.id != excluded else { return nil }
+            let name: String
+            switch item {
+            case .defaultApp(let kind): name = kind.title
+            case .installed(let app): name = app.appInfo.displayName() ?? ""
+            default: return nil
+            }
+            return SplitPickerModel.Entry(id: item.id, name: name,
+                                          icon: splitIcon(for: item, darkIcons: darkIcons),
+                                          isOpen: running.contains(item.id))
+        }
+    }
+
+    private func splitIcon(for item: FlekHomeItem, darkIcons: Bool) -> UIImage? {
+        let key = "\(item.id)|\(darkIcons)" as NSString
+        if let cached = Self.splitIconCache.object(forKey: key) { return cached }
+        let image: UIImage?
+        switch item {
+        case .defaultApp(let kind): image = UIImage(named: kind.iconAssetName)
+        case .installed(let app): image = app.appInfo.iconIsDarkIcon(darkIcons)
+        default: image = nil
+        }
+        if let image { Self.splitIconCache.setObject(image, forKey: key) }
+        return image
+    }
+
+    /// An app chosen for the side with none: an open one is moved onto it, and
+    /// one not yet running is started, to open onto it when its window arrives.
+    private func splitPickerChose(_ itemID: String, from source: CGRect) {
+        guard canSplitNow, let side = splitPair?.choosingSide else { return }
+        MultitaskDockManager.buttonHaptic()
+        if let running = runningApp(forItemID: itemID) {
+            placeInSplit(running.appUUID, on: side, from: source)
+            return
+        }
+        guard let item = splitHomeItems?().first(where: { $0.id == itemID }),
+              let open = splitOpenHomeItem else { return }
+        splitLaunch = SplitLaunch(side: side, itemID: itemID, source: source)
+        splitPickerModel.launchingID = itemID
+        open(item)
+        // A launch that never brings a window, refused or failed, stops showing as
+        // one; the alert saying why is the home screen's.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 30) { [weak self] in
+            guard let self, self.splitLaunch?.itemID == itemID else { return }
+            self.splitLaunch = nil
+            self.splitPickerModel.launchingID = nil
+        }
+    }
+
+    /// Puts an open app's window on `side`, out of `source` if it was put away.
+    private func placeInSplit(_ uuid: String, on side: SplitSide, from source: CGRect?) {
+        guard let pair = splitPair else { return }
+        splitLaunch = nil
+        splitPickerModel.launchingID = nil
+        splitPair = pair.with(uuid, on: side)
+        relayoutSplitWindow(of: uuid, animated: false)
+        syncSplitChrome()
+        _ = bringMultitaskViewToFront(uuid: uuid, fromRect: source,
+                                      fromRectRadius: source == nil ? nil : SplitAppPicker.iconCornerRadius)
+    }
+
+    // MARK: Lifting an app
+
+    /// The app button held long enough to lift the app in use, if one can be:
+    /// from here a drag lifts it rather than switching apps.
+    func splitLiftArm() -> Bool {
+        guard canSplitNow, !isHomeState, !isAppSwitcherOpen, quickSwitch.drag == nil,
+              let uuid = frontmostAppUUID, let view = splitWindow(of: uuid),
+              !view.isHidden, view.alpha > 0.1 else { return false }
+        splitLiftArmed = true
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        return true
+    }
+
+    func splitLiftDisarm() {
+        splitLiftArmed = false
+    }
+
+    /// The held app button dragged: the app in use lifts off the screen.
+    func splitLiftBegan(at point: CGPoint) -> Bool {
+        guard splitLiftArmed, let uuid = frontmostAppUUID,
+              beginSplitLift(of: uuid, at: point) else { return false }
+        splitAppButtonTapSuppressed = true
+        return true
+    }
+
+    /// The handle under `side` swiped up and held, or carried aside: that side's
+    /// app lifts off the screen, in use or not, as iOS lifts an app from its own
+    /// home indicator.
+    private func splitHandleLiftBegan(_ side: SplitSide, at point: CGPoint) -> Bool {
+        guard let uuid = splitPair?.app(on: side) else { return false }
+        return beginSplitLift(of: uuid, at: point)
+    }
+
+    /// `uuid` lifts off the screen under the finger, its corners rounded like the
+    /// screen's, as iOS shows an app being moved. Where it can go is shown as it
+    /// goes: on its own, a shelf at each side; beside another app, the other side
+    /// only, marked as a swap, and over it the app there moves across to show it.
+    private func beginSplitLift(of uuid: String, at point: CGPoint) -> Bool {
+        guard splitLift == nil, canSplitNow, !isHomeState, !isAppSwitcherOpen,
+              let view = splitWindow(of: uuid), !view.isHidden, view.alpha > 0.1,
+              !LCMinimizeToIconAnimator.holdsGeometry(of: view) else { return false }
+        UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+        let from = splitPair?.side(of: uuid)
+        let other = from.flatMap { splitPair?.app(on: $0.opposite) }.flatMap { splitWindow(of: $0) }
+        let lift = SplitLift(uuid: uuid, view: view, center: view.center, start: point,
+                             from: from, otherView: other)
+        splitLift = lift
+        view.superview?.bringSubviewToFront(view)
+        // In the window's own space, so shrunk with it they are the screen's
+        // corners at the app's size.
+        view.layer.cornerCurve = .continuous
+        view.layer.masksToBounds = true
+        UIView.animate(withDuration: 0.35, delay: 0, usingSpringWithDamping: 0.85,
+                       initialSpringVelocity: 0,
+                       options: [.allowUserInteraction, .beginFromCurrentState]) {
+            view.layer.cornerRadius = self.deviceScreenCornerRadius
+        }
+        // Out of the way while the app is in the air: they go back to where the
+        // two are once it lands.
+        syncSplitChrome()
+        showSplitShelves(for: lift)
+        moveSplitLift(to: point, animated: true)
+        return true
+    }
+
+    func splitLiftMoved(to point: CGPoint) {
+        moveSplitLift(to: point, animated: false)
+    }
+
+    /// Let go: on a shelf, or flung towards one, the app takes that side, or
+    /// swaps sides with the app beside it, and is the one in use; anywhere else it
+    /// goes back.
+    func splitLiftEnded(at point: CGPoint, velocity: CGFloat) {
+        guard let lift = splitLift else { return }
+        splitLift = nil
+        splitLiftArmed = false
+        releaseAppButtonTapSoon()
+        // Which shelf it was let go over, while the shelves are still up: which
+        // are up is what decides where it can go.
+        let shelves = Set(splitShelves.keys)
+        var side = splitShelfSide(at: point)
+        hideSplitShelves()
+        let travelled = hypot(point.x - lift.start.x, point.y - lift.start.y)
+        if side == nil, travelled > 40, abs(velocity) > 900 {
+            let flung: SplitSide = velocity < 0 ? .left : .right
+            if shelves.contains(flung) { side = flung }
+        }
+        let next: SplitPair?
+        if let side, canSplitNow {
+            if let pair = splitPair, let from = pair.side(of: lift.uuid) {
+                next = side == from ? nil : pair.swapped
+                // An app chosen for the other side and still starting goes where
+                // that side has gone.
+                if next != nil, let launch = splitLaunch {
+                    splitLaunch = SplitLaunch(side: launch.side.opposite, itemID: launch.itemID, source: nil)
+                }
+            } else {
+                endSplit()
+                next = SplitPair.empty.with(lift.uuid, on: side)
+            }
+        } else {
+            next = nil
+        }
+        guard let next else {
+            settleSplitLift(lift)
+            return
+        }
+        // Counted before the pair changes, which can already ask for the
+        // divider: it waits for the app to have grown back into its side.
+        splitSettlingCount += 1
+        splitPair = next
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        UIView.animate(withDuration: 0.4, delay: 0, usingSpringWithDamping: 0.9,
+                       initialSpringVelocity: 0,
+                       options: [.allowUserInteraction, .beginFromCurrentState]) {
+            lift.view.transform = .identity
+            lift.view.layer.cornerRadius = 0
+        } completion: { _ in
+            // Unless it has been lifted again since.
+            if self.splitLift?.view !== lift.view { lift.restoreCorners() }
+            self.splitSettlingCount = max(self.splitSettlingCount - 1, 0)
+            self.syncSplitChrome()
+        }
+        for uuid in next.members {
+            if let other = lift.otherView, splitWindow(of: uuid) === other, lift.previewing {
+                // Already where it is going, moved there to show the swap: put
+                // there for real without a move of its own.
+                UIView.performWithoutAnimation { other.transform = .identity }
+                relayoutSplitWindow(of: uuid, animated: false)
+            } else {
+                relayoutSplitWindow(of: uuid, animated: true)
+            }
+        }
+        if frontmostAppUUID != lift.uuid { windowTookStage(uuid: lift.uuid) }
+        syncSplitChrome()
+    }
+
+    /// The lift taken away from the finger: the app goes back where it was.
+    func splitLiftCancelled() {
+        splitLiftArmed = false
+        guard let lift = splitLift else { return }
+        splitLift = nil
+        releaseAppButtonTapSoon()
+        hideSplitShelves()
+        settleSplitLift(lift)
+    }
+
+    private func settleSplitLift(_ lift: SplitLift) {
+        // What is drawn around the two waits for it to be back in its place.
+        splitSettlingCount += 1
+        UIView.animate(withDuration: 0.4, delay: 0, usingSpringWithDamping: 0.85,
+                       initialSpringVelocity: 0,
+                       options: [.allowUserInteraction, .beginFromCurrentState]) {
+            lift.view.transform = .identity
+            lift.view.layer.cornerRadius = 0
+            lift.otherView?.transform = .identity
+        } completion: { _ in
+            if self.splitLift?.view !== lift.view { lift.restoreCorners() }
+            self.splitSettlingCount = max(self.splitSettlingCount - 1, 0)
+            self.syncSplitChrome()
+        }
+    }
+
+    /// The button's own tap, if the finger is let go over it, comes in the same
+    /// moment; any later one is a press of its own.
+    private func releaseAppButtonTapSoon() {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in
+            self?.splitAppButtonTapSuppressed = false
+        }
+    }
+
+    private func moveSplitLift(to point: CGPoint, animated: Bool) {
+        guard let lift = splitLift else { return }
+        let scale = Self.splitLiftScale
+        // Shrunk about its centre and held just above the finger, as iOS holds an
+        // app being moved.
+        let center = CGPoint(x: point.x, y: point.y - lift.view.bounds.height * scale * 0.4)
+        let transform = CGAffineTransform(translationX: center.x - lift.center.x,
+                                          y: center.y - lift.center.y)
+            .scaledBy(x: scale, y: scale)
+        let target = splitShelfSide(at: point)
+        let apply = {
+            lift.view.transform = transform
+            for (side, shelf) in self.splitShelves {
+                shelf.alpha = side == target ? 1 : 0.6
+                shelf.transform = side == target ? CGAffineTransform(scaleX: 1.04, y: 1.04) : .identity
+            }
+        }
+        if animated {
+            UIView.animate(withDuration: 0.35, delay: 0, usingSpringWithDamping: 0.85,
+                           initialSpringVelocity: 0,
+                           options: [.allowUserInteraction, .beginFromCurrentState],
+                           animations: apply)
+        } else {
+            apply()
+        }
+        if target != lift.target {
+            lift.target = target
+            if target != nil { UISelectionFeedbackGenerator().selectionChanged() }
+        }
+        // Beside another app and over its side: that app moves across to where
+        // this one was, so the swap is seen before the finger lets go, and back
+        // again once the finger leaves.
+        if let from = lift.from, let other = lift.otherView {
+            let previewing = target == from.opposite
+            if previewing != lift.previewing {
+                lift.previewing = previewing
+                let shift = splitPaneFrame(from).minX - splitPaneFrame(from.opposite).minX
+                UIView.animate(withDuration: 0.4, delay: 0, usingSpringWithDamping: 0.85,
+                               initialSpringVelocity: 0,
+                               options: [.allowUserInteraction, .beginFromCurrentState]) {
+                    other.transform = previewing ? CGAffineTransform(translationX: shift, y: 0) : .identity
+                }
+            }
+        }
+    }
+
+    /// A shelf: in the middle of its side of the screen, where the app will land,
+    /// and measured clear of the status bar's column on the side that has it.
+    private func splitShelfFrame(_ side: SplitSide) -> CGRect {
+        let content = splitContentFrame(side)
+        let width = min(content.width * 0.55, 240)
+        let height = min(content.height * 0.7, 420)
+        return CGRect(x: content.midX - width / 2, y: content.midY - height / 2,
+                      width: width, height: height)
+    }
+
+    /// Which of the shelves up `point` is over, with some room round each to catch
+    /// a finger that is nearly there. None reaches the app button, in the side
+    /// column or the bar along the bottom, nor a side's handle, so the app is not
+    /// over one as it is lifted.
+    private func splitShelfSide(at point: CGPoint) -> SplitSide? {
+        splitShelves.keys.first { splitShelfFrame($0).insetBy(dx: -40, dy: -50).contains(point) }
+    }
+
+    /// The shelves for `lift`: one at each side for an app on its own; beside
+    /// another app, the other side's only, marked with iOS's swap arrows where an
+    /// app is there to swap with, since dropping on its own side changes nothing.
+    private func showSplitShelves(for lift: SplitLift) {
+        guard let host = windowHostingView.superview else { return }
+        let sides: [SplitSide] = lift.from.map { [$0.opposite] } ?? SplitSide.allCases
+        for side in sides where splitShelves[side] == nil {
+            let symbol: String
+            if lift.otherView != nil {
+                symbol = "arrow.left.arrow.right"
+            } else {
+                symbol = side == .left ? "rectangle.lefthalf.inset.filled" : "rectangle.righthalf.inset.filled"
+            }
+            let shelf = UIView(frame: windowHostingView.convert(splitShelfFrame(side), to: host))
+            shelf.backgroundColor = UIColor(white: 1, alpha: 0.16)
+            shelf.layer.cornerRadius = 26
+            shelf.layer.cornerCurve = .continuous
+            shelf.layer.borderWidth = 1
+            shelf.layer.borderColor = UIColor(white: 1, alpha: 0.4).cgColor
+            shelf.isUserInteractionEnabled = false
+            let glyph = UIImageView(image: UIImage(
+                systemName: symbol,
+                withConfiguration: UIImage.SymbolConfiguration(pointSize: 28, weight: .medium)))
+            glyph.tintColor = UIColor(white: 1, alpha: 0.95)
+            glyph.sizeToFit()
+            glyph.center = CGPoint(x: shelf.bounds.midX, y: shelf.bounds.midY)
+            shelf.addSubview(glyph)
+            shelf.alpha = 0
+            host.addSubview(shelf)
+            splitShelves[side] = shelf
+        }
+        arrangeSplitChrome()
+        UIView.animate(withDuration: 0.25, delay: 0, options: [.allowUserInteraction]) {
+            for shelf in self.splitShelves.values { shelf.alpha = 0.6 }
+        }
+    }
+
+    private func hideSplitShelves() {
+        let shelves = Array(splitShelves.values)
+        splitShelves = [:]
+        UIView.animate(withDuration: 0.2, animations: {
+            shelves.forEach { $0.alpha = 0 }
+        }, completion: { _ in
+            shelves.forEach { $0.removeFromSuperview() }
+        })
+    }
+
+    // MARK: Once side by side
+
+    /// Back to one app at a time: each of the two gets the whole screen again.
+    func endSplit() {
+        splitLaunch = nil
+        splitPickerModel.launchingID = nil
+        guard let pair = splitPair else { return }
+        splitPair = nil
+        syncSplitChrome()
+        for uuid in pair.members { restoreWholeScreen(uuid) }
+    }
+
+    /// A window that has left a split given the whole screen again: now if it is
+    /// in view or put away, and once it lands if it is on its way in or out,
+    /// where the jump would be seen.
+    private func restoreWholeScreen(_ uuid: String) {
+        guard let view = splitWindow(of: uuid) else { return }
+        if view.isHidden {
+            relayoutSplitWindow(of: uuid, animated: false)
+        } else if view.alpha < 0.1 || LCMinimizeToIconAnimator.holdsGeometry(of: view) {
+            // Still flying: the other of two going home together has landed
+            // first. Re-framed in the air, it grew while it shrank.
+            splitLeftovers.insert(uuid)
+        } else {
+            relayoutSplitWindow(of: uuid, animated: true)
+        }
+    }
+
+    /// Frames `uuid`'s window for the page it has now, or for the whole screen.
+    private func relayoutSplitWindow(of uuid: String, animated: Bool) {
+        guard let app = apps.first(where: { $0.appUUID == uuid }), let view = app.view else { return }
+        let apply = {
+            if app.isInternalPage {
+                let pageFrame = self.splitPageFrame(forAppUUID: uuid)
+                let frame = pageFrame ?? self.windowHostingView.bounds
+                // Through bounds and centre, as guest windows are placed: a page
+                // can be carrying a transform, and `frame` is undefined under one.
+                view.bounds = CGRect(origin: .zero, size: frame.size)
+                view.center = CGPoint(x: frame.midX, y: frame.midY)
+                // Cut off at the fold. A page draws past its own edges where it
+                // lets a row run on for its shadows, as the installer's category
+                // chips do, and full screen those edges are the screen's; beside
+                // another app one of them is the fold, and the row ran on over it.
+                view.clipsToBounds = pageFrame != nil
+                // Its room for the bar follows: kept on the edges it reaches now.
+                if let controller = self.internalPageControllers[uuid] {
+                    self.applyBarInset(to: controller, reserved: self.isVisible && self.isSwitcherBarVisible)
+                }
+            } else if let vc = view._viewDelegate() as? DecoratedAppSceneViewController {
+                vc.refreshPaneLayout()
+            }
+        }
+        if animated {
+            UIView.animate(withDuration: 0.4, delay: 0, usingSpringWithDamping: 1,
+                           initialSpringVelocity: 0,
+                           options: [.allowUserInteraction, .beginFromCurrentState],
+                           animations: apply)
+        } else {
+            UIView.performWithoutAnimation(apply)
+        }
+    }
+
+    /// Puts `uuid` away where it stands, without an exit of its own: it has been
+    /// replaced on its side, or has gone already. Its picture goes with it: it was
+    /// of the app at half the screen, and its card in the switcher, on its own,
+    /// shows the app's icon until the app is on screen again.
+    private func putAwayInPlace(_ uuid: String) {
+        guard let view = splitWindow(of: uuid), !view.isHidden else { return }
+        forgetSplitSnapshot(uuid)
+        if let vc = view._viewDelegate() as? DecoratedAppSceneViewController {
+            vc.finishMinimizeWindow()
+        } else {
+            view.isHidden = true
+            view.transform = .identity
+            view.superview?.sendSubviewToBack(view)
+        }
+        relayoutSplitWindow(of: uuid, animated: false)
+    }
+
+    /// Keeps what is drawn around the two in step with them: the backdrop under
+    /// both, and while both sides are in view and no app is in the air, the apps
+    /// to choose from, each app's handle and the divider on the fold.
+    ///
+    /// Faded as the windows go, but at once if none of them is left on the
+    /// screen: faded after them, it stood there alone for as long as the fade.
+    func syncSplitChrome() {
+        let members = splitPair?.members ?? apps.map(\.appUUID)
+        let windowsShown = members.contains { uuid in
+            splitWindow(of: uuid).map { !$0.isHidden && $0.alpha > 0.1 } ?? false
+        }
+        if windowsShown {
+            applySplitChrome()
+        } else {
+            UIView.performWithoutAnimation { self.applySplitChrome() }
+        }
+    }
+
+    private func applySplitChrome() {
+        let showing = isSplitShowing
+        let windows = showing ? (splitPair?.members.compactMap { splitWindow(of: $0) } ?? []) : []
+        windowHostingView.splitWindows = showing ? windows : nil
+        // In view, and staying: neither setting off home, and at least one of them
+        // already in place. Going home, the two fly while they are still shown,
+        // and coming back they are shown before they arrive; what is drawn around
+        // them goes as they set off and waits for them on the way back, so it is
+        // never on the screen without them. An app chosen for an empty side flies
+        // in beside one that is there already, and that leaves it all where it is.
+        // The same holds for the two growing back into their sides after a lift,
+        // and for the switcher closing over them.
+        let inView = !windows.isEmpty
+            && windows.allSatisfy { !$0.isHidden && $0.alpha > 0.1 }
+            && !windows.contains(where: LCMinimizeToIconAnimator.isLeaving)
+            && windows.contains { !LCMinimizeToIconAnimator.isArriving($0) }
+            && splitSettlingCount == 0
+            && !splitChromeAwaitsSwitcher
+            // Nor while a swipe along the bar is moving the two.
+            && quickSwitch.drag == nil && quickSwitch.settling == nil
+        let lifting = splitLift != nil
+        syncSplitPicker(shown: inView && !lifting)
+        // Faded rather than taken away while an app is in the air: a handle may be
+        // what is lifting it, and taken away it would let go. None with the floating
+        // button: put the bar away, and the two have the screen to themselves, as
+        // one app does, but for iOS's own indicator.
+        syncSplitHandles(shown: inView && !usesFloatingButton, faded: lifting)
+        guard inView, !lifting, let host = windowHostingView.superview else {
+            if splitPair == nil {
+                removeSplitDivider()
+                splitCurtain?.removeFromSuperview()
+                splitCurtain = nil
+            } else {
+                setSplitDividerShown(false)
+            }
+            return
+        }
+        let divider: SplitDividerView
+        if let existing = splitDivider {
+            divider = existing
+        } else {
+            divider = makeSplitDivider()
+            // Faded in below, once it is in place.
+            divider.isHidden = true
+        }
+        if divider.superview !== host { host.addSubview(divider) }
+        // Left where it is while it is being dragged.
+        if divider.transform == .identity {
+            let left = splitPaneFrame(.left)
+            let radius = SplitDividerView.cornerRadius
+            let frame = CGRect(x: left.maxX - radius, y: left.minY,
+                               width: radius * 2 + Self.splitGap, height: left.height)
+            divider.frame = windowHostingView.convert(frame, to: host)
+        }
+        divider.showsPaired = isSplitPairSaved
+        setSplitDividerShown(true)
+        arrangeSplitChrome()
+    }
+
+    /// The divider faded in or out with the windows it stands between, rather
+    /// than switched on and off ahead of them or behind them.
+    private func setSplitDividerShown(_ shown: Bool) {
+        guard let divider = splitDivider else { return }
+        if shown {
+            // There already, or on its way.
+            guard divider.isHidden || divider.alpha < 1 else { return }
+            if divider.isHidden {
+                divider.alpha = 0
+                divider.isHidden = false
+            }
+            UIView.animate(withDuration: 0.2, delay: 0,
+                           options: [.allowUserInteraction, .beginFromCurrentState]) {
+                divider.alpha = 1
+            }
+        } else {
+            // Gone already, or going.
+            guard !divider.isHidden, divider.alpha > 0 else { return }
+            UIView.animate(withDuration: Self.splitChromeFadeOut, delay: 0, options: [.beginFromCurrentState]) {
+                divider.alpha = 0
+            } completion: { _ in
+                // Unless it has been asked back meanwhile.
+                if divider.alpha == 0 { divider.isHidden = true }
+            }
+        }
+    }
+
+    /// The divider gone for good, the two no longer side by side: faded out
+    /// where it stands, as the windows part.
+    private func removeSplitDivider() {
+        guard let divider = splitDivider else { return }
+        splitDivider = nil
+        guard !divider.isHidden, divider.alpha > 0 else {
+            divider.removeFromSuperview()
+            return
+        }
+        divider.isUserInteractionEnabled = false
+        UIView.animate(withDuration: Self.splitChromeFadeOut, delay: 0, options: [.beginFromCurrentState]) {
+            divider.alpha = 0
+        } completion: { _ in
+            divider.removeFromSuperview()
+        }
+    }
+
+    /// What is drawn around the two, in its order over the windows: the apps to
+    /// choose from, the shelves and the curtain, the handles, the divider on top.
+    private func arrangeSplitChrome() {
+        guard let host = windowHostingView.superview else { return }
+        var views: [UIView] = []
+        if let picker = splitPicker?.view { views.append(picker) }
+        for side in SplitSide.allCases { if let shelf = splitShelves[side] { views.append(shelf) } }
+        if let curtain = splitCurtain { views.append(curtain) }
+        for side in SplitSide.allCases { if let handle = splitHandles[side] { views.append(handle) } }
+        if let divider = splitDivider { views.append(divider) }
+        var below: UIView = windowHostingView
+        for view in views where view.superview === host {
+            host.insertSubview(view, aboveSubview: below)
+            below = view
+        }
+    }
+
+    private func makeSplitDivider() -> SplitDividerView {
+        let divider = SplitDividerView(gap: Self.splitGap)
+        divider.addGestureRecognizer(UIPanGestureRecognizer(target: self,
+                                                            action: #selector(splitDividerPanned(_:))))
+        divider.addGestureRecognizer(UITapGestureRecognizer(target: self,
+                                                            action: #selector(splitDividerTapped)))
+        splitDivider = divider
+        return divider
+    }
+
+    // MARK: The handles
+
+    /// A handle under each app, where its home indicator would be on a Duo of its
+    /// own. iOS's own indicator, in the middle of the screen, still goes to the
+    /// iPhone's home screen; these act on their own side.
+    private func syncSplitHandles(shown: Bool, faded: Bool) {
+        guard shown, let pair = splitPair, let host = windowHostingView.superview else {
+            removeSplitHandles()
+            return
+        }
+        for side in SplitSide.allCases {
+            guard pair.app(on: side) != nil else {
+                splitHandles.removeValue(forKey: side)?.removeFromSuperview()
+                continue
+            }
+            let handle: SplitHandleView
+            let isNew = splitHandles[side] == nil
+            if let existing = splitHandles[side] {
+                handle = existing
+            } else {
+                handle = SplitHandleView()
+                handle.onUse = { [weak self] in self?.splitSideHandleUsed(side) }
+                handle.onLiftBegan = { [weak self] point in
+                    self?.splitHandleLiftBegan(side, at: point) ?? false
+                }
+                handle.onLiftMoved = { [weak self] point in self?.splitLiftMoved(to: point) }
+                handle.onLiftEnded = { [weak self] point, velocity in
+                    self?.splitLiftEnded(at: point, velocity: velocity)
+                }
+                handle.onLiftCancelled = { [weak self] in self?.splitLiftCancelled() }
+                host.addSubview(handle)
+                splitHandles[side] = handle
+            }
+            let content = splitContentFrame(side)
+            let height = max(windowHostingView.window?.safeAreaInsets.bottom ?? 0, 20)
+            let width: CGFloat = 160
+            let frame = CGRect(x: content.midX - width / 2, y: content.maxY - height,
+                               width: width, height: height)
+            if isNew {
+                // Faded in where it belongs, rather than flown there from nowhere
+                // by whatever animation this was called in.
+                UIView.performWithoutAnimation {
+                    handle.frame = self.windowHostingView.convert(frame, to: host)
+                    handle.alpha = 0
+                }
+                if !faded {
+                    UIView.animate(withDuration: 0.2, delay: 0,
+                                   options: [.allowUserInteraction, .beginFromCurrentState]) {
+                        handle.alpha = 1
+                    }
+                }
+            } else {
+                handle.alpha = faded ? 0 : 1
+                handle.frame = windowHostingView.convert(frame, to: host)
+            }
+        }
+        arrangeSplitChrome()
+    }
+
+    /// The handles taken away, faded out where they stand rather than snatched:
+    /// with the windows setting off home, or the bar put away.
+    private func removeSplitHandles() {
+        let leaving = Array(splitHandles.values)
+        splitHandles = [:]
+        guard !leaving.isEmpty else { return }
+        for handle in leaving { handle.isUserInteractionEnabled = false }
+        UIView.animate(withDuration: Self.splitChromeFadeOut, delay: 0, options: [.beginFromCurrentState]) {
+            for handle in leaving { handle.alpha = 0 }
+        } completion: { _ in
+            for handle in leaving { handle.removeFromSuperview() }
+        }
+    }
+
+    /// The floating button come up in the bar's place, or gone again. The
+    /// handles go and come with the bar (see `syncSplitChrome`).
+    fileprivate func splitControlChanged() {
+        guard splitPair != nil else { return }
+        syncSplitChrome()
+    }
+
+    /// A side's handle swiped up, or tapped: that side's app is put away, still
+    /// running, and the side shows the apps to choose from. With no app on the
+    /// other side either, it is the way home.
+    private func splitSideHandleUsed(_ side: SplitSide) {
+        guard isSplitShowing, let pair = splitPair, let uuid = pair.app(on: side),
+              let view = splitWindow(of: uuid) else { return }
+        let rest = pair.with(nil, on: side)
+        guard let other = rest.members.first else {
+            // Gone home from the page it was on, given the whole screen once out
+            // of sight.
+            splitPair = nil
+            splitLeftovers.insert(uuid)
+            syncSplitChrome()
+            goHome()
+            return
+        }
+        MultitaskDockManager.buttonHaptic()
+        splitPair = rest
+        splitLaunch = nil
+        if frontmostAppUUID != other { windowTookStage(uuid: other) }
+        UIView.animate(withDuration: 0.25, delay: 0, options: [.curveEaseIn]) {
+            view.alpha = 0
+            view.transform = CGAffineTransform(scaleX: 0.92, y: 0.92)
+        } completion: { _ in
+            self.putAwayInPlace(uuid)
+            self.syncSplitChrome()
+        }
+    }
+
+    // MARK: The divider
+
+    /// The divider follows the finger across one side, darkening it. Let go far
+    /// enough across, or flicked that way, and that side's app is put away;
+    /// otherwise the divider goes back to the fold.
+    @objc private func splitDividerPanned(_ pan: UIPanGestureRecognizer) {
+        guard isSplitShowing, let divider = splitDivider, let host = divider.superview else {
+            settleSplitDivider()
+            return
+        }
+        let left = splitPaneFrame(.left)
+        let right = splitPaneFrame(.right)
+        let offset = min(max(pan.translation(in: host).x, -left.width), right.width)
+        let side: SplitSide = offset < 0 ? .left : .right
+        let width = side == .left ? left.width : right.width
+        let progress = width > 0 ? abs(offset) / width : 0
+        switch pan.state {
+        case .began, .changed:
+            divider.transform = CGAffineTransform(translationX: offset, y: 0)
+            let curtain: UIView
+            if let existing = splitCurtain {
+                curtain = existing
+            } else {
+                curtain = UIView()
+                curtain.backgroundColor = .black
+                curtain.isUserInteractionEnabled = false
+                host.addSubview(curtain)
+                splitCurtain = curtain
+                arrangeSplitChrome()
+            }
+            curtain.frame = windowHostingView.convert(side == .left ? left : right, to: host)
+            curtain.alpha = min(progress * 1.4, 0.85)
+        case .ended:
+            let velocity = pan.velocity(in: host).x
+            let towards = side == .left ? -velocity : velocity
+            if progress > 0.4 || (progress > 0.08 && towards > 800) {
+                closeSplitSide(side)
+            } else {
+                settleSplitDivider()
+            }
+        default:
+            settleSplitDivider()
+        }
+    }
+
+    private func settleSplitDivider() {
+        let curtain = splitCurtain
+        splitCurtain = nil
+        UIView.animate(withDuration: 0.35, delay: 0, usingSpringWithDamping: 0.9,
+                       initialSpringVelocity: 0,
+                       options: [.allowUserInteraction, .beginFromCurrentState]) {
+            self.splitDivider?.transform = .identity
+            curtain?.alpha = 0
+        } completion: { _ in
+            curtain?.removeFromSuperview()
+        }
+    }
+
+    /// The divider let go across `side`: that side goes dark and its app is put
+    /// away, still running, and the other app grows over the screen. A pair is
+    /// parted this way. With no app on the other side, only the apps to choose
+    /// from, it is the way home.
+    private func closeSplitSide(_ side: SplitSide) {
+        guard let pair = splitPair else { return }
+        let leaving = pair.app(on: side)
+        let staying = pair.app(on: side.opposite)
+        UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+        if let leaving, let staying,
+           let leavingID = splitItemID(of: leaving), let stayingID = splitItemID(of: staying) {
+            forgetSplitPair(leavingID, stayingID)
+        }
+        let curtain = splitCurtain
+        splitCurtain = nil
+        UIView.animate(withDuration: 0.15, delay: 0, options: [.curveEaseOut]) {
+            curtain?.alpha = 1
+        } completion: { _ in
+            defer { curtain?.removeFromSuperview() }
+            guard self.splitPair == pair else { return }
+            // Gone with the side it closed, from where the finger left it: put
+            // back on the fold to fade there, it would jump back to the middle.
+            self.splitDivider?.removeFromSuperview()
+            self.splitDivider = nil
+            self.splitPair = nil
+            self.splitLaunch = nil
+            guard let staying else {
+                if let leaving { self.splitLeftovers.insert(leaving) }
+                self.syncSplitChrome()
+                self.goHome()
+                return
+            }
+            if let leaving { self.putAwayInPlace(leaving) }
+            self.syncSplitChrome()
+            if let view = self.splitWindow(of: staying) {
+                view.superview?.bringSubviewToFront(view)
+            }
+            self.windowTookStage(uuid: staying)
+            self.relayoutSplitWindow(of: staying, animated: true)
+        }
+    }
+
+    // MARK: Pairs
+
+    /// Pairs of apps that open together, as home screen items, left then right.
+    private var savedSplitPairs: [[String]] {
+        get { (LCUtils.appGroupUserDefault.array(forKey: Self.splitPairsKey) as? [[String]]) ?? [] }
+        set { LCUtils.appGroupUserDefault.set(newValue, forKey: Self.splitPairsKey) }
+    }
+
+    private var isSplitPairSaved: Bool {
+        guard let pair = splitPair, let left = pair.left, let right = pair.right,
+              let leftID = splitItemID(of: left), let rightID = splitItemID(of: right) else { return false }
+        return savedSplitPairs.contains([leftID, rightID])
+    }
+
+    /// The app `itemID` is paired with, and the side it opens on.
+    private func savedSplitPartner(of itemID: String) -> (itemID: String, side: SplitSide)? {
+        for pair in savedSplitPairs where pair.count == 2 {
+            if pair[0] == itemID { return (pair[1], .right) }
+            if pair[1] == itemID { return (pair[0], .left) }
+        }
+        return nil
+    }
+
+    private func forgetSplitPair(_ a: String, _ b: String) {
+        savedSplitPairs = savedSplitPairs.filter { !($0.contains(a) && $0.contains(b)) }
+    }
+
+    /// The divider tapped: the two are paired, and from now on opening either
+    /// opens both, each on its side. An app is in one pair at a time.
+    @objc private func splitDividerTapped() {
+        guard isSplitShowing, let pair = splitPair, let left = pair.left, let right = pair.right,
+              let leftID = splitItemID(of: left), let rightID = splitItemID(of: right) else { return }
+        if !isSplitPairSaved {
+            var pairs = savedSplitPairs.filter { !$0.contains(leftID) && !$0.contains(rightID) }
+            pairs.append([leftID, rightID])
+            savedSplitPairs = pairs
+        }
+        UINotificationFeedbackGenerator().notificationOccurred(.success)
+        splitDivider?.showsPaired = true
+        splitDivider?.bounce()
+    }
+
+    /// Whether `uuid` is paired with another app, and so has to open beside it.
+    /// If it is, it is given its side now, before it comes forward or opens, and
+    /// what is returned opens the other app beside it once it has. A partner gone
+    /// from the home screen takes the pair with it.
+    func splitPartnerOpener(for uuid: String) -> (() -> Void)? {
+        guard splitPair == nil, splitLift == nil, canSplitNow,
+              let itemID = splitItemID(of: uuid),
+              let partner = savedSplitPartner(of: itemID) else { return nil }
+        let running = runningApp(forItemID: partner.itemID)
+        let item = running == nil ? splitHomeItems?().first(where: { $0.id == partner.itemID }) : nil
+        guard running != nil || (item != nil && splitOpenHomeItem != nil) else {
+            forgetSplitPair(itemID, partner.itemID)
+            return nil
+        }
+        splitPair = SplitPair.empty.with(uuid, on: partner.side.opposite)
+        let inView = splitWindow(of: uuid).map { !$0.isHidden && $0.alpha > 0.1 } ?? false
+        relayoutSplitWindow(of: uuid, animated: inView)
+        return { [weak self] in
+            guard let self, self.splitPair?.contains(uuid) == true,
+                  self.splitPair?.app(on: partner.side) == nil else { return }
+            if let running, running.appUUID != uuid {
+                self.placeInSplit(running.appUUID, on: partner.side, from: nil)
+            } else if let item, let open = self.splitOpenHomeItem {
+                self.splitLaunch = SplitLaunch(side: partner.side, itemID: partner.itemID, source: nil)
+                self.splitPickerModel.launchingID = partner.itemID
+                self.syncSplitChrome()
+                open(item)
+            }
+        }
+    }
+
+    // MARK: In the switcher
+
+    /// A switcher card tapped: its app comes forward out of the card, with the app
+    /// beside it too where the two were kept together (see `restoreSuspendedSplit`).
+    func openFromSwitcherCard(_ uuid: String, fromRect: CGRect?, fromRectRadius: CGFloat?) {
+        dismissAppSwitcher()
+        _ = bringMultitaskViewToFront(uuid: uuid, fromRect: fromRect, fromRectRadius: fromRectRadius)
+    }
+
+    /// Two kept from going home, together again because `uuid`, one of them, is
+    /// coming forward, however it was opened: from the switcher, the home screen,
+    /// the dock or the home button. The other comes forward first, so `uuid` ends
+    /// in front and in use. Folded, the two come back one in front of the other,
+    /// to be side by side once the phone is opened out.
+    ///
+    /// The other comes out of the same kind of place as `uuid`: its own icon in
+    /// the home dock beside the one pressed (`fromDock`), or its own half of the
+    /// switcher's card (`fromCard`). Left to find its own way, it came out of its
+    /// icon on the home screen while the one pressed grew out of the dock.
+    private func restoreSuspendedSplit(_ pair: SplitPair, bringingForward uuid: String,
+                                       fromDock: Bool = false, fromCard: Bool = false,
+                                       cardRadius: CGFloat? = nil) {
+        splitSuspended = nil
+        guard pair.members.allSatisfy({ splitWindow(of: $0) != nil }) else { return }
+        splitPair = pair
+        for member in pair.members { relayoutSplitWindow(of: member, animated: false) }
+        syncSplitChrome()
+        for other in pair.members where other != uuid {
+            if fromCard, let card = switcherCardFrames[other] {
+                _ = bringMultitaskViewToFront(uuid: other, fromRect: card, fromRectRadius: cardRadius)
+            } else if fromDock, let icon = splitItemID(of: other).flatMap(dockIconFrame(forItemID:)) {
+                _ = bringMultitaskViewToFront(uuid: other, fromIcon: icon)
+            } else {
+                _ = bringMultitaskViewToFront(uuid: other)
+            }
+        }
+    }
+
+    /// Where `itemID`'s icon is in the home dock: as it is laid out now, or as the
+    /// home state that has just ended left it, the home button having ended it
+    /// before bringing an app back out of its icon.
+    private func dockIconFrame(forItemID itemID: String) -> CGRect? {
+        homeDockIconFrames[itemID] ?? (isHomeState ? nil : lastHomeDockIconFrames[itemID])
+    }
+
+    /// Whether `frame` is `itemID`'s icon in the home dock, now or as the home
+    /// state that has just ended left it. Two kept side by side come back one
+    /// after the other, and the first to come forward ends the home state: the
+    /// second's own icon, passed in a moment before, was taken for a card's.
+    func isHomeDockIcon(_ frame: CGRect, forItemID itemID: String) -> Bool {
+        dockIconFrame(forItemID: itemID) == frame
+    }
+
+    /// Two kept from going home become apps of their own: those still put away
+    /// lose their pictures from half the screen (see `putAwayInPlace`). `shown`
+    /// is coming forward, and is pictured again on screen.
+    private func dissolveSuspendedSplit(except shown: String? = nil) {
+        guard let pair = splitSuspended else { return }
+        splitSuspended = nil
+        for uuid in pair.members where uuid != shown && splitWindow(of: uuid)?.isHidden == true {
+            forgetSplitSnapshot(uuid)
+        }
+        // Kept in their places while they were kept (see `framedSplitPair`): the
+        // whole screen each, from here.
+        for uuid in pair.members where splitPair?.contains(uuid) != true {
+            restoreWholeScreen(uuid)
+        }
+    }
+
+    private func forgetSplitSnapshot(_ uuid: String) {
+        appSnapshotViews.removeValue(forKey: uuid)
+        appSnapshotImages.removeValue(forKey: uuid)
+        appSnapshotSizes.removeValue(forKey: uuid)
+        appSnapshotRotations.removeValue(forKey: uuid)
+        splitPaneSnapshots.remove(uuid)
+        appSnapshotDisplays.removeValue(forKey: uuid)
+    }
+
+    /// The shape of a picture of `side`'s app, taken as `captureSnapshot` takes one
+    /// beside another app: its page, less the safe area on the screen's edges it
+    /// reaches, but for the side a picture of the whole screen keeps (where the
+    /// status bar's column stands). What shapes a half of the two's card with no
+    /// picture to show, and what the fold between the halves is measured against.
+    func splitPictureShape(_ side: SplitSide) -> CGSize {
+        let pane = splitPaneFrame(side)
+        let bounds = CGRect(origin: .zero, size: splitHostSize)
+        let safe = windowHostingView.window?.safeAreaInsets ?? .zero
+        // The screen's safe area, on the edges the page shares with the screen.
+        let insets = UIEdgeInsets(top: pane.minY <= bounds.minY + 1 ? safe.top : 0,
+                                  left: pane.minX <= bounds.minX + 1 ? safe.left : 0,
+                                  bottom: pane.maxY >= bounds.maxY - 1 ? safe.bottom : 0,
+                                  right: pane.maxX >= bounds.maxX - 1 ? safe.right : 0)
+        let trim = Self.pictureTrim(of: insets, turn: landscapePictureTurn(of: windowHostingView))
+        return CGSize(width: max(pane.width - trim.left - trim.right, 1),
+                      height: max(pane.height - trim.top - trim.bottom, 1))
+    }
+
+    // MARK: Keeping up
+
+    /// `uuid` in front and in use, where it is already on screen.
+    private func bringSplitAppForward(_ uuid: String) {
+        guard let view = splitWindow(of: uuid), !view.isHidden else { return }
+        view.superview?.bringSubviewToFront(view)
+        if frontmostAppUUID != uuid { windowTookStage(uuid: uuid) }
+    }
+
+    /// A finger came down on `window`: a built-in page's, or a window's own
+    /// edges. Of two side by side, the one touched is the one in use.
+    @objc func windowTouched(_ window: UIView) {
+        guard let uuid = apps.first(where: { $0.view === window })?.appUUID else { return }
+        splitAppTouched(uuid)
+    }
+
+    /// An app said it was touched. Its own content's touches go to it straight,
+    /// never through FlekDeck's views, so for a guest app this is the only way
+    /// to know (see LCGuestSideBar.m).
+    @objc func guestTouched(_ uuid: String) {
+        splitAppTouched(uuid)
+    }
+
+    /// Of two side by side, the one touched is the one in use: in front, and the
+    /// one the bar's buttons act on and its icon shows.
+    private func splitAppTouched(_ uuid: String) {
+        guard let pair = splitPair, isSplitShowing, splitLift == nil,
+              pair.contains(uuid), uuid != frontmostAppUUID else { return }
+        DispatchQueue.main.async {
+            guard self.splitPair == pair, self.splitLift == nil, self.frontmostAppUUID != uuid,
+                  let view = self.splitWindow(of: uuid) else { return }
+            view.superview?.bringSubviewToFront(view)
+            self.windowTookStage(uuid: uuid)
+        }
+    }
+
+    /// A window set off to or from an icon, or arrived (see
+    /// `LCMinimizeToIconAnimator.isLeaving` and `isArriving`). Checked after the
+    /// burst, as for a window hidden or shown: a landing hides its window straight
+    /// after saying so.
+    func windowTravelDidChange() {
+        windowVisibilityDidChange()
+    }
+
+    /// A window has set off into its icon. Checked at once rather than after the
+    /// burst: nothing about it changes with the next runloop, and what is drawn
+    /// around two side by side goes in the frame the two start to move.
+    func windowDidDepart() {
+        guard splitPair != nil else { return }
+        syncSplitChrome()
+    }
+
+    /// A window was hidden or shown, or faded. Checked once, after the burst.
+    @objc func windowVisibilityDidChange() {
+        guard splitPair != nil || !splitLeftovers.isEmpty, !splitCheckQueued else { return }
+        splitCheckQueued = true
+        DispatchQueue.main.async {
+            self.splitCheckQueued = false
+            self.reconcileSplit()
+        }
+    }
+
+    private func reconcileSplit() {
+        for uuid in splitLeftovers {
+            guard let view = splitWindow(of: uuid) else {
+                splitLeftovers.remove(uuid)
+                continue
+            }
+            if view.isHidden {
+                splitLeftovers.remove(uuid)
+                relayoutSplitWindow(of: uuid, animated: false)
+            } else if view.alpha >= 0.1, !LCMinimizeToIconAnimator.holdsGeometry(of: view) {
+                splitLeftovers.remove(uuid)
+                relayoutSplitWindow(of: uuid, animated: true)
+            }
+        }
+        guard let pair = splitPair else { return }
+        // An app on either side put away, or gone: the split is over. Gone home
+        // from with both still open, it is kept, as it was, for the switcher.
+        if pair.members.contains(where: { splitWindow(of: $0)?.isHidden ?? true }) {
+            if isHomeState, pair.left != nil, pair.right != nil,
+               pair.members.allSatisfy({ splitWindow(of: $0) != nil }) {
+                splitSuspended = pair
+            } else {
+                // Put away some other way: pictured at half the screen, which its
+                // card on its own has no use for (see `putAwayInPlace`).
+                for uuid in pair.members where splitWindow(of: uuid)?.isHidden == true {
+                    forgetSplitSnapshot(uuid)
+                }
+            }
+            endSplit()
+            return
+        }
+        syncSplitChrome()
+    }
+
+    /// The window host changed size: folded onto the cover display, or turned.
+    /// Folded, or turned upright while open, there is room for one app: the two
+    /// stay together, the app last used fills the screen in front and in use, and
+    /// the other waits behind it, still running. Opened out again, or turned
+    /// back, they are side by side as they were. iOS keeps the app on the right,
+    /// whichever was in use, and drops the other on folding; the app the user was
+    /// in is the one they mean to carry on with, and the two are the user's to part.
+    /// With no second app chosen yet, the one app there is is the one in front.
+    /// The host re-frames every guest straight after this.
+    @objc func windowHostDidResize() {
+        if splitLift != nil { splitLiftCancelled() }
+        // Two kept are kept in their places where there is room for two, and
+        // given the whole screen each where there is not (see `framedSplitPair`).
+        // Guests are re-framed by the host; built-in pages are not.
+        if let kept = splitSuspended {
+            for uuid in kept.members where apps.first(where: { $0.appUUID == uuid })?.isInternalPage == true {
+                relayoutSplitWindow(of: uuid, animated: false)
+            }
+        }
+        guard let pair = splitPair else { return }
+        let keeper = frontmostAppUUID.flatMap { pair.contains($0) ? $0 : nil } ?? pair.right ?? pair.left
+        syncSplitChrome()
+        // Side by side or not any more, another app may be under the column.
+        refreshSideColumnRoom()
+        // Not for a turn the switcher makes, for itself and back.
+        if !isSplitShowing, !isOpeningAppSwitcher, !isAppSwitcherOpen, let keeper {
+            DispatchQueue.main.async { self.bringSplitAppForward(keeper) }
+        }
+        // Guests are re-framed by the host; built-in pages are not.
+        for uuid in pair.members where apps.first(where: { $0.appUUID == uuid })?.isInternalPage == true {
+            relayoutSplitWindow(of: uuid, animated: false)
+        }
+    }
+}
+
+/// The app button held, then dragged: the app in use lifts off the screen under
+/// the finger, to be dropped on a side of an iPhone Duo opened out. iOS lifts an
+/// app the same way, with a swipe up from its home indicator held a moment; here
+/// the app button is the home indicator, since that swipe is iOS's own.
+@available(iOS 16.0, *)
+private struct SplitLiftGesture: ViewModifier {
+    @EnvironmentObject var dockManager: MultitaskDockManager
+    @State private var reading = SplitLiftReading()
+    /// True while the press is live, so a gesture the system takes over, which
+    /// SwiftUI never ends, still puts the app back.
+    @GestureState private var isPressing = false
+
+    func body(content: Content) -> some View {
+        content.simultaneousGesture(
+            LongPressGesture(minimumDuration: 0.3, maximumDistance: 12)
+                .sequenced(before: DragGesture(minimumDistance: 0, coordinateSpace: .global))
+                .updating($isPressing) { _, pressing, _ in pressing = true }
+                .onChanged { value in
+                    guard case .second(true, let drag) = value else { return }
+                    if !reading.armed {
+                        reading.armed = true
+                        reading.canLift = dockManager.splitLiftArm()
+                    }
+                    guard reading.canLift, let drag else { return }
+                    if !reading.lifted {
+                        reading.lifted = dockManager.splitLiftBegan(at: drag.startLocation)
+                        if !reading.lifted { reading.canLift = false }
+                    }
+                    if reading.lifted { dockManager.splitLiftMoved(to: drag.location) }
+                }
+                .onEnded { value in
+                    defer { reading.reset() }
+                    guard reading.lifted else {
+                        if reading.armed { dockManager.splitLiftDisarm() }
+                        return
+                    }
+                    if case .second(true, let drag?) = value {
+                        let velocity: CGFloat
+                        if #available(iOS 17.0, *) {
+                            velocity = drag.velocity.width
+                        } else {
+                            velocity = (drag.predictedEndLocation.x - drag.location.x) * 4
+                        }
+                        dockManager.splitLiftEnded(at: drag.location, velocity: velocity)
+                    } else {
+                        dockManager.splitLiftCancelled()
+                    }
+                }
+        )
+        .onChange(of: isPressing) { pressing in
+            if !pressing { cancelUnended() }
+        }
+        // Nor does a bar torn down mid-lift tell its gesture anything.
+        .onDisappear { cancelUnended() }
+    }
+
+    /// Puts back what a cancelled lift moved, a turn of the run loop later: a
+    /// press that ended has been through onEnded by then.
+    private func cancelUnended() {
+        let reading = reading, dockManager = dockManager
+        DispatchQueue.main.async {
+            defer { reading.reset() }
+            if reading.lifted {
+                dockManager.splitLiftCancelled()
+            } else if reading.armed {
+                dockManager.splitLiftDisarm()
+            }
+        }
+    }
+}
+
+/// The lift's reading of the press under way, kept in a reference so that
+/// updating it is not a change of view state.
+private final class SplitLiftReading {
+    var armed = false
+    var canLift = false
+    var lifted = false
+
+    func reset() {
+        armed = false
+        canLift = false
+        lifted = false
+    }
+}
+
+/// The apps the side with no app chooses from.
+final class SplitPickerModel: ObservableObject {
+    struct Entry: Identifiable, Equatable {
+        let id: String
+        let name: String
+        let icon: UIImage?
+        let isOpen: Bool
+    }
+
+    @Published var entries: [Entry] = []
+    /// The app chosen and starting up, shown as such until its window arrives.
+    @Published var launchingID: String?
+}
+
+/// The apps to choose from on a side of the screen with no app: a page of the
+/// home screen on the wallpaper, as iOS shows on its own Duo, with the apps
+/// already open first, since this is that side's switcher too.
+struct SplitAppPicker: View {
+    static let iconSize: CGFloat = 58
+    static let iconCornerRadius: CGFloat = SplitAppPicker.iconSize * 0.225
+
+    @ObservedObject var model: SplitPickerModel
+    let choose: (String, CGRect) -> Void
+
+    var body: some View {
+        let open = model.entries.filter(\.isOpen)
+        let others = model.entries.filter { !$0.isOpen }
+        ZStack {
+            FlekWallpaperView()
+                .overlay(Color.black.opacity(0.2))
+                .ignoresSafeArea()
+            ScrollView {
+                VStack(alignment: .leading, spacing: 24) {
+                    if !open.isEmpty {
+                        section("Open", open)
+                    }
+                    section(open.isEmpty ? nil : "Apps", others)
+                }
+                .padding(.horizontal, 20)
+                .padding(.vertical, 28)
+            }
+        }
+        .environment(\.colorScheme, .dark)
+    }
+
+    private func section(_ title: String?, _ entries: [SplitPickerModel.Entry]) -> some View {
+        VStack(alignment: .leading, spacing: 14) {
+            if let title {
+                Text(title)
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundColor(.white.opacity(0.85))
+            }
+            LazyVGrid(columns: [GridItem(.adaptive(minimum: 76, maximum: 96), spacing: 10)],
+                      spacing: 18) {
+                ForEach(entries) { entry in
+                    SplitPickerCell(entry: entry,
+                                    isLaunching: model.launchingID == entry.id,
+                                    choose: choose)
+                }
+            }
+        }
+    }
+}
+
+private struct SplitPickerCell: View {
+    let entry: SplitPickerModel.Entry
+    let isLaunching: Bool
+    let choose: (String, CGRect) -> Void
+    /// Where the icon is in the window: the app opens out of it.
+    @State private var iconFrame: CGRect = .zero
+
+    var body: some View {
+        Button {
+            choose(entry.id, iconFrame)
+        } label: {
+            VStack(spacing: 6) {
+                ZStack {
+                    if let icon = entry.icon {
+                        Image(uiImage: icon).resizable()
+                    } else {
+                        Color.white.opacity(0.2)
+                    }
+                    if isLaunching {
+                        Color.black.opacity(0.35)
+                        ProgressView()
+                            .progressViewStyle(CircularProgressViewStyle(tint: .white))
+                    }
+                }
+                .frame(width: SplitAppPicker.iconSize, height: SplitAppPicker.iconSize)
+                .clipShape(RoundedRectangle(cornerRadius: SplitAppPicker.iconCornerRadius,
+                                            style: .continuous))
+                .background(
+                    GeometryReader { geometry in
+                        Color.clear
+                            .onAppear { iconFrame = geometry.frame(in: .global) }
+                            .onChange(of: geometry.frame(in: .global)) { iconFrame = $0 }
+                    }
+                )
+                Text(entry.name)
+                    .font(.system(size: 12))
+                    .foregroundColor(.white)
+                    .lineLimit(1)
+                    .shadow(color: .black.opacity(0.4), radius: 2, y: 1)
+            }
+            .frame(maxWidth: .infinity)
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(entry.name)
+    }
+}
+
+/// The black on the fold between two apps side by side: the gap itself, the
+/// corners that round each app off on its side of it, and a handle to drag.
+/// Drawn over the two windows rather than cut out of them, so whatever a window
+/// is doing — opening out of an icon, flying home — its own corners are left
+/// alone. Turns FlekDeck's blue once the two are paired.
+final class SplitDividerView: UIView {
+    /// The corners each app is rounded off by beside the fold.
+    static let cornerRadius: CGFloat = 14
+    private static let pairedColor = UIColor(red: 0, green: 117 / 255, blue: 1, alpha: 1)
+
+    let gap: CGFloat
+    var showsPaired = false {
+        didSet {
+            guard showsPaired != oldValue else { return }
+            handle.backgroundColor = showsPaired ? Self.pairedColor : UIColor(white: 1, alpha: 0.55)
+            accessibilityValue = showsPaired ? "Paired" : nil
+        }
+    }
+    private let shape = CAShapeLayer()
+    private let handle = UIView()
+
+    init(gap: CGFloat) {
+        self.gap = gap
+        super.init(frame: .zero)
+        backgroundColor = .clear
+        shape.fillColor = UIColor.black.cgColor
+        layer.addSublayer(shape)
+        handle.backgroundColor = UIColor(white: 1, alpha: 0.55)
+        handle.layer.cornerRadius = 2
+        handle.isUserInteractionEnabled = false
+        addSubview(handle)
+        isAccessibilityElement = true
+        accessibilityLabel = "Split View Divider"
+        accessibilityHint = "Tap to pair the two apps."
+        accessibilityTraits = .button
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        let bounds = self.bounds
+        let r = Self.cornerRadius
+        let width = bounds.width, height = bounds.height
+        // The gap, and beside it at the top and bottom the four corners that round
+        // each app off: each the corner of its app's side less a quarter circle.
+        // Drawn as pieces rather than cut out of the whole strip with the even-odd
+        // rule, whose cut edges, lying along the strip's own, left a hairline down
+        // each side of it.
+        let path = UIBezierPath(rect: CGRect(x: r, y: 0, width: width - 2 * r, height: height))
+        func corner(_ point: CGPoint, center: CGPoint, from start: CGFloat, to end: CGFloat, clockwise: Bool) {
+            let piece = UIBezierPath()
+            piece.move(to: point)
+            piece.addArc(withCenter: center, radius: r, startAngle: start, endAngle: end, clockwise: clockwise)
+            piece.close()
+            path.append(piece)
+        }
+        corner(CGPoint(x: r, y: 0), center: CGPoint(x: 0, y: r), from: 0, to: -.pi / 2, clockwise: false)
+        corner(CGPoint(x: r, y: height), center: CGPoint(x: 0, y: height - r), from: 0, to: .pi / 2, clockwise: true)
+        corner(CGPoint(x: width - r, y: 0), center: CGPoint(x: width, y: r), from: .pi, to: .pi * 1.5, clockwise: true)
+        corner(CGPoint(x: width - r, y: height), center: CGPoint(x: width, y: height - r), from: .pi, to: .pi / 2, clockwise: false)
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        shape.frame = bounds
+        shape.path = path.cgPath
+        CATransaction.commit()
+        handle.bounds = CGRect(x: 0, y: 0, width: 4, height: 44)
+        handle.center = CGPoint(x: bounds.midX, y: bounds.midY)
+    }
+
+    /// A little jump of the handle, for the tap that pairs the two.
+    func bounce() {
+        UIView.animate(withDuration: 0.12, animations: {
+            self.handle.transform = CGAffineTransform(scaleX: 1.6, y: 1.25)
+        }, completion: { _ in
+            UIView.animate(withDuration: 0.3, delay: 0, usingSpringWithDamping: 0.5,
+                           initialSpringVelocity: 0, options: [], animations: {
+                self.handle.transform = .identity
+            })
+        })
+    }
+
+    /// The gap and a few points either side of it: enough to take hold of,
+    /// without taking touches meant for the apps' edges.
+    override func point(inside point: CGPoint, with event: UIEvent?) -> Bool {
+        abs(point.x - bounds.midX) <= gap / 2 + 8 && point.y >= 0 && point.y <= bounds.height
+    }
+}
+
+/// The handle under one of two apps side by side, where its home indicator
+/// would be on a Duo of its own: swiped up, or tapped, that side shows the apps
+/// to choose from.
+final class SplitHandleView: UIView {
+    var onUse: (() -> Void)?
+    /// Lifting the app from the handle: where the finger is, in the window.
+    var onLiftBegan: ((CGPoint) -> Bool)?
+    var onLiftMoved: ((CGPoint) -> Void)?
+    var onLiftEnded: ((CGPoint, CGFloat) -> Void)?
+    var onLiftCancelled: (() -> Void)?
+    private var lifting = false
+    private var pause: Timer?
+    private let pill = UIView()
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        backgroundColor = .clear
+        pill.backgroundColor = UIColor(white: 0.5, alpha: 0.8)
+        pill.layer.cornerRadius = 2.5
+        pill.isUserInteractionEnabled = false
+        addSubview(pill)
+        addGestureRecognizer(UITapGestureRecognizer(target: self, action: #selector(tapped)))
+        addGestureRecognizer(UIPanGestureRecognizer(target: self, action: #selector(panned(_:))))
+        isAccessibilityElement = true
+        accessibilityLabel = "Choose Another App"
+        accessibilityTraits = .button
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        // Where iOS draws its own indicator, a little above the bottom edge.
+        pill.frame = CGRect(x: bounds.midX - 50, y: bounds.maxY - 13, width: 100, height: 5)
+    }
+
+    @objc private func tapped() { onUse?() }
+
+    /// Up and let go, as a swipe: `onUse`. Up and held a moment, or up and carried
+    /// aside: the app lifts, as iOS lifts an app with a swipe up from its home
+    /// indicator held a moment, and the drag carries it from there.
+    @objc private func panned(_ pan: UIPanGestureRecognizer) {
+        let point = pan.location(in: nil)
+        let translation = pan.translation(in: self)
+        switch pan.state {
+        case .changed:
+            if lifting {
+                onLiftMoved?(point)
+                return
+            }
+            guard translation.y < -30 else { return }
+            if abs(translation.x) > 40 {
+                beginLift(at: point)
+            } else {
+                waitForPause(of: pan)
+            }
+        case .ended:
+            pause?.invalidate()
+            if lifting {
+                lifting = false
+                onLiftEnded?(point, pan.velocity(in: nil).x)
+                return
+            }
+            let velocity = pan.velocity(in: self)
+            if translation.y < -24 || velocity.y < -500 { onUse?() }
+        case .cancelled, .failed:
+            pause?.invalidate()
+            if lifting {
+                lifting = false
+                onLiftCancelled?()
+            }
+        default:
+            break
+        }
+    }
+
+    /// The finger held still for a moment, up from the edge: the app lifts there.
+    /// Started again by every move, so it only fires on a pause.
+    private func waitForPause(of pan: UIPanGestureRecognizer) {
+        pause?.invalidate()
+        pause = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: false) { [weak self, weak pan] _ in
+            guard let self, let pan, !self.lifting,
+                  pan.state == .began || pan.state == .changed else { return }
+            self.beginLift(at: pan.location(in: nil))
+        }
+    }
+
+    private func beginLift(at point: CGPoint) {
+        pause?.invalidate()
+        lifting = onLiftBegan?(point) ?? false
+        if lifting { onLiftMoved?(point) }
+    }
 }

@@ -24,5 +24,9 @@ API_AVAILABLE(ios(16.0))
 /// Kept apart from `backdropSuspended`, which flights set and clear on their own
 /// schedule, so neither lets the backdrop back while the other still holds it.
 @property(nonatomic) BOOL backdropHeldForQuickSwitch;
+/// The two windows standing side by side on an iPhone Duo opened out, or nil.
+/// Both are in front, so the backdrop goes under the lower of the two rather
+/// than directly under the one on top, where it would black out the other.
+@property(nonatomic, copy) NSArray<UIView *> *splitWindows;
 - (BOOL)handleStatusBarTapAction:(UIAction *)action;
 @end
