@@ -850,6 +850,10 @@ static NSString* invokeAppMain(NSString *selectedApp, NSString *selectedContaine
         // Nor can the window see where an iPhone Duo puts the app's own side bar,
         // which its buttons stand beside — see LCGuestSideBar.m. The app says.
         LCGuestSideBarInit(dataUUID);
+        // Nor does iOS show it the second step of the contacts permission, which
+        // it raises only for an app's own process — see LCGuestContacts.m. The
+        // host asks instead.
+        LCGuestContactsInit(dataUUID);
         // Closing a window signals the guest dead, which is sooner than
         // CFPreferences would have got round to writing its changes out.
         NUDGuestFlushOnTerminationInit();

@@ -322,6 +322,8 @@
 				DecoratedAppSceneViewController.m,
 				LCGuestCaptureNotice.h,
 				LCGuestCaptureNotice.m,
+				LCGuestContactsAccess.h,
+				LCGuestContactsAccess.m,
 				LCGuestVolume.h,
 				LCGuestVolume.m,
 				LCRotationLock.swift,

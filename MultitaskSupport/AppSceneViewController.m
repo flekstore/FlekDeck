@@ -10,6 +10,7 @@
 #import "../LiveContainerSwiftUI/Utilities/LCUtils.h"
 #import "PiPManager.h"
 #import "LCGuestCaptureNotice.h"
+#import "LCGuestContactsAccess.h"
 #import "Localization.h"
 #import "LCSharedUtils.h"
 #import "utils.h"
@@ -442,6 +443,8 @@ static void LCRecoverLegacyStagedCopies(NSURL *appGroupLC, NSURL *docURL) {
 @property(nonatomic) NSNumber *pipReadyToken;
 /// Raises the Single Mode sheet when the guest is refused the microphone.
 @property(nonatomic) LCGuestCaptureNotice *captureNotice;
+/// Asks iOS for contacts on the guest's behalf, which the guest cannot finish.
+@property(nonatomic) LCGuestContactsAccess *contactsAccess;
 /// Registration on the guest's report of where its own side bar sits.
 @property(nonatomic) NSNumber *sideBarToken;
 @property(nonatomic) NSNumber *touchToken;
@@ -643,6 +646,9 @@ static UIDeviceOrientation LCDeviceOrientationForInterface(UIInterfaceOrientatio
 // clears self.delegate on teardown, and this callback still has to reach the
 // object that asked for the launch.
 - (void)beginExtensionRequestWithItem:(NSExtensionItem *)item delegate:(id<AppSceneViewControllerDelegate>)delegate {
+    // Before the guest starts, unlike the channels that wait for its scene: an
+    // app can ask for contacts as soon as it launches.
+    [self beginHandlingGuestContactsRequests];
     [_extension beginExtensionRequestWithInputItems:@[item] completion:^(NSUUID *identifier) {
         if(identifier) {
             [MultitaskManager registerMultitaskContainerWithContainer:self.dataUUID];
@@ -985,6 +991,8 @@ static UIDeviceOrientation LCDeviceOrientationForInterface(UIInterfaceOrientatio
     [self endObservingGuestTouches];
     [_captureNotice invalidate];
     _captureNotice = nil;
+    [_contactsAccess invalidate];
+    _contactsAccess = nil;
 
     dispatch_async(dispatch_get_main_queue(), ^{
         // Bring the guest's container back and release the staged bundle. This
@@ -1099,6 +1107,20 @@ static UIDeviceOrientation LCDeviceOrientationForInterface(UIInterfaceOrientatio
     if(self.captureNotice) return;
     self.captureNotice = [[LCGuestCaptureNotice alloc] initWithDataUUID:self.dataUUID];
     self.captureNotice.hostViewController = self;
+}
+
+/// Asks iOS for contacts when the guest wants to.
+///
+/// Since iOS 18 the contacts permission is asked in two steps, and iOS shows the
+/// second — share all contacts or pick some — only to an app's own process. A
+/// guest in a window is an app extension, so its own request stops after the
+/// first step and the app is refused, over and over. LCGuestContacts hands the
+/// request here; the host asks instead and gets both steps over FlekDeck, and
+/// the guest then reads the answer, which is FlekDeck's permission in either
+/// mode.
+- (void)beginHandlingGuestContactsRequests {
+    if(self.contactsAccess) return;
+    self.contactsAccess = [[LCGuestContactsAccess alloc] initWithDataUUID:self.dataUUID];
 }
 
 /// Listens for the guest's report of where its own side bar sits.
