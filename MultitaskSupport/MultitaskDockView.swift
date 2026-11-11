@@ -371,6 +371,11 @@ class AppInfoProvider {
     /// opens, shown blurred behind the cards — the app-switcher equivalent of
     /// Spotlight's blurred home background.
     @Published var springboardSnapshot: UIImage?
+    /// The switcher's backdrop kept from one open to the next (see
+    /// `switcherBackdropPicture`).
+    private var keptSwitcherBackdrop: (image: UIImage, size: CGSize, style: UIUserInterfaceStyle, epoch: Int)?
+    /// Counts the chances the springboard has had to change.
+    private var springboardEpoch = 0
     /// Published mirror of `isBarLandscape` so the SwiftUI bar content can react
     /// to rotation (its own local geometry is always a horizontal strip and
     /// can't reveal orientation).
@@ -2454,7 +2459,7 @@ class AppInfoProvider {
     /// turn is declined (rotation locked at the system level, so it never comes).
     private func whenUpright(_ body: @escaping () -> Void) {
         AppDelegate.orientationLock = .portrait
-        guard AppDelegate.applyOrientationLock(), let window = keyWindow else {
+        guard !displayNeverTurns, AppDelegate.applyOrientationLock(), let window = keyWindow else {
             body()
             return
         }
@@ -3593,6 +3598,7 @@ class AppInfoProvider {
         let wasHomeState = isHomeState
         isHomeState = false
         frontmostAppUUID = uuid
+        if apps.first(where: { $0.appUUID == uuid })?.isInternalPage == true { springboardMayHaveChanged() }
         // However it got here, a run of swipes along the bar is over. A swipe
         // that landed here starts its run again once this is done.
         quickSwitch.isLive = false
@@ -4176,9 +4182,45 @@ class AppInfoProvider {
     /// app-window host hidden; `isHidden` is honoured by layer rendering without a
     /// screen update, so hiding + restoring in place causes no flicker.
     func captureSpringboardSnapshot() {
-        // Blurred behind the cards anyway — render at 1x, not full retina.
-        guard let image = renderSpringboard(scale: 1) else { return }
+        guard let image = switcherBackdropPicture() else { return }
         springboardSnapshot = image
+    }
+
+    /// The springboard as the switcher's backdrop shows it: blurred behind the
+    /// cards anyway, so drawn at 1x, not full retina.
+    ///
+    /// Drawing it is a pass over the whole springboard on the main thread, and it
+    /// came at the moment the switcher was asked for, every time. So a copy is
+    /// drawn a moment after an app covers the home screen and kept for every open
+    /// after, while nothing can have changed the springboard: drawn for this size
+    /// and light or dark look, and no chance to change it since (see
+    /// `springboardMayHaveChanged`). On the home screen, or over a built-in page,
+    /// it is drawn fresh, as before, and not kept.
+    private func switcherBackdropPicture() -> UIImage? {
+        let size = keyWindow?.bounds.size ?? .zero
+        let style = keyWindow?.traitCollection.userInterfaceStyle ?? .unspecified
+        let keepable = !isHomeState && !frontmostIsBuiltInPage
+        if keepable, let kept = keptSwitcherBackdrop, kept.size == size, kept.style == style,
+           kept.epoch == springboardEpoch {
+            return kept.image
+        }
+        guard let image = renderSpringboard(scale: 1) else { return nil }
+        keptSwitcherBackdrop = keepable ? (image, size, style, springboardEpoch) : nil
+        return image
+    }
+
+    /// The springboard may look different from here on: it has been on screen, to
+    /// be changed directly, or a built-in page has come forward, where its
+    /// wallpaper, its look and its apps are changed. A kept backdrop goes.
+    private func springboardMayHaveChanged() {
+        springboardEpoch += 1
+        keptSwitcherBackdrop = nil
+    }
+
+    /// Settings, the Installer or the store in front, rather than an app.
+    private var frontmostIsBuiltInPage: Bool {
+        guard let uuid = frontmostAppUUID else { return false }
+        return apps.first(where: { $0.appUUID == uuid })?.isInternalPage == true
     }
 
     /// The springboard drawn without the app windows over it, `scale` pixels to
@@ -4324,17 +4366,22 @@ class AppInfoProvider {
             appSnapshotDisplays.removeValue(forKey: appUUID)
         }
 
-        // A frozen bitmap of the app exactly as it looks right now. `drawHierarchy`
-        // renders through the render server, so unlike `layer.render(in:)` it can
-        // capture the guest's hosted layer — but only while the view is actually on
-        // screen, which is the moment this runs. `afterScreenUpdates: true` is what
-        // makes the hosted content resolve; with `false` the guest's layer has not
-        // been committed into the context and comes back blank.
+        // A frozen bitmap of the page exactly as it looks right now, drawn through
+        // the render server while the view is on screen, which is the moment this
+        // runs.
         // Internal pages only. A guest app renders into a remote layer composited by
         // the render server, and the host process cannot read those pixels back:
         // `drawHierarchy` reports success — it did draw the local hierarchy — but the
         // guest's content simply is not in it, so the bitmap comes out black. Internal
         // pages are ordinary in-process views and capture correctly.
+        //
+        // As it is on screen, not after the next screen update. Waiting for that
+        // held the main thread until the render server had drawn a fresh frame, on
+        // every opening of the switcher over a page and on the way home from it:
+        // measured at about 0.2s over the Installer in the iPhone Duo simulator,
+        // varying with how heavy the page is to draw, while the finger on the cards
+        // waited. A page in view has long been committed; there is nothing newer to
+        // wait for. Where nothing could be drawn, the replicant below stands in.
         if app.isInternalPage {
             let renderer = UIGraphicsImageRenderer(size: viewSize)
             var drawn = false
@@ -4342,7 +4389,7 @@ class AppInfoProvider {
                 drawn = appView.drawHierarchy(
                     in: CGRect(origin: CGPoint(x: -captureRect.origin.x, y: -captureRect.origin.y),
                                size: appView.bounds.size),
-                    afterScreenUpdates: true)
+                    afterScreenUpdates: false)
             }
             if drawn {
                 // Stored as captured; the card turns it when it draws it.
@@ -4476,13 +4523,25 @@ class AppInfoProvider {
         // while it is in flight can hand the window back to the app being left.
         isOpeningAppSwitcher = true
         AppDelegate.orientationLock = .portrait
-        if AppDelegate.applyOrientationLock() {
+        // Where the display never turns there is no turn to wait for, and waiting
+        // ran out the whole grace period on every open before the cards came up.
+        if !displayNeverTurns, AppDelegate.applyOrientationLock() {
             whenWindowIsPortrait(keyWindow) { [weak self] in
                 self?.presentAppSwitcher(in: keyWindow)
             }
             return
         }
         presentAppSwitcher(in: keyWindow)
+    }
+
+    /// Whether the display FlekDeck is on keeps its shape whatever is asked of it:
+    /// the iPhone Duo's inner one, opened out, where iOS shows every scene in all
+    /// orientations and no lock holds. The portrait the switcher and the way home
+    /// ask for is never granted there, so whatever waits for it waits in vain;
+    /// both go ahead as they are. The cover display turns as any iPhone's does.
+    private var displayNeverTurns: Bool {
+        guard let screen = keyWindow?.windowScene?.screen else { return false }
+        return FlekDeviceModel.duoDisplay(of: screen) == .inner
     }
 
     /// Calls `body` once the window has finished rotating to portrait, or after a
@@ -9197,6 +9256,7 @@ extension MultitaskDockManager {
         run.springboardImageWork = nil
         if isHomeState {
             run.springboardImage = nil
+            springboardMayHaveChanged()
         } else if run.springboardImage == nil {
             prepareQuickSwitchSpringboardImage(after: 1)
         }
@@ -9215,6 +9275,9 @@ extension MultitaskDockManager {
                 return
             }
             _ = self.quickSwitchSpringboardImage()
+            // And the switcher's, kept for its next open where nothing can change
+            // the springboard meanwhile.
+            if !self.frontmostIsBuiltInPage { _ = self.switcherBackdropPicture() }
         }
         run.springboardImageWork = work
         DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
