@@ -111,6 +111,11 @@ static void *kBackdropObservationContext = &kBackdropObservationContext;
     [self updateBackdropVisibility];
 }
 
+- (void)setLiftChromeViews:(NSArray<UIView *> *)liftChromeViews {
+    _liftChromeViews = [liftChromeViews copy];
+    [self updateBackdropVisibility];
+}
+
 - (void)setBackdropSuspended:(BOOL)backdropSuspended {
     _backdropSuspended = backdropSuspended;
     [self updateBackdropVisibility];
@@ -131,6 +136,7 @@ static void *kBackdropObservationContext = &kBackdropObservationContext;
     UIView *frontmostWindow = nil;
     for(UIView *subview in self.subviews.reverseObjectEnumerator) {
         if(subview == _backdropView || subview == _leavingWindow) continue;
+        if([_liftChromeViews indexOfObjectIdenticalTo:subview] != NSNotFound) continue;
         if(!subview.hidden && subview.alpha > 0.1) {
             frontmostWindow = subview;
             break;
@@ -146,6 +152,19 @@ static void *kBackdropObservationContext = &kBackdropObservationContext;
             if(index < lowest) {
                 lowest = index;
                 anchor = window;
+            }
+        }
+    }
+    // Drop zones laid under the window being lifted: under them too, or the
+    // backdrop, directly under that window, would black them out.
+    if(anchor) {
+        NSUInteger lowest = [self.subviews indexOfObjectIdenticalTo:anchor];
+        for(UIView *chrome in _liftChromeViews) {
+            if(chrome.superview != self) continue;
+            NSUInteger index = [self.subviews indexOfObjectIdenticalTo:chrome];
+            if(index < lowest) {
+                lowest = index;
+                anchor = chrome;
             }
         }
     }

@@ -28,5 +28,9 @@ API_AVAILABLE(ios(16.0))
 /// Both are in front, so the backdrop goes under the lower of the two rather
 /// than directly under the one on top, where it would black out the other.
 @property(nonatomic, copy) NSArray<UIView *> *splitWindows;
+/// Drop zones laid among the windows while one is being lifted, just under it,
+/// so the window being carried stays in front of them. Not windows: never taken
+/// for the window in front, and the backdrop goes under them rather than over.
+@property(nonatomic, copy) NSArray<UIView *> *liftChromeViews;
 - (BOOL)handleStatusBarTapAction:(UIAction *)action;
 @end

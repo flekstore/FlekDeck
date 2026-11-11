@@ -330,8 +330,14 @@ class AppInfoProvider {
     var splitLiftArmed = false
     /// The app lifted off the screen by the app button, under the finger.
     var splitLift: SplitLift?
+    /// An app being carried out of the home dock (see `DockLift`).
+    var dockLift: DockLift?
+    /// The running app whose dock icon is held, ready to be carried out.
+    var dockLiftArmed: String?
+    /// The home screen frosted and dimmed behind an app carried out of the dock.
+    private var dockLiftBackdrop: UIVisualEffectView?
     /// The drop targets at each side while an app is lifted.
-    var splitShelves: [SplitSide: UIView] = [:]
+    var splitShelves: [SplitSide: SplitShelfView] = [:]
     /// The handle under each app: its own home indicator.
     var splitHandles: [SplitSide: SplitHandleView] = [:]
     /// The app button's tap that ends a lift is not a press of the button.
@@ -3062,9 +3068,54 @@ class AppInfoProvider {
         
         let panGesture = UIPanGestureRecognizer(target: self, action: #selector(navAssistDragged(_:)))
         button.addGestureRecognizer(panGesture)
-        
+
+        // Held, then dragged: the app in use lifts off the screen, as from the
+        // bar's app button. Only where two apps can be put side by side, so
+        // anywhere else a hold and a drag still moves the button.
+        let liftPress = UILongPressGestureRecognizer(target: self, action: #selector(navAssistLiftPressed(_:)))
+        liftPress.minimumPressDuration = 0.3
+        liftPress.allowableMovement = 12
+        liftPress.delegate = self
+        button.addGestureRecognizer(liftPress)
+
         return button
     }
+
+    /// The floating button held, then dragged: the same lift as the bar's app
+    /// button (`SplitLiftGesture`).
+    @objc private func navAssistLiftPressed(_ gesture: UILongPressGestureRecognizer) {
+        let point = navAssistLiftPoint(gesture)
+        switch gesture.state {
+        case .began:
+            // Nothing to lift after all: the press is called off (its cancel
+            // disarms), which puts it out of the way of the button's own drag.
+            guard splitLiftArm(), splitLiftBegan(at: point, keepingGrabPoint: true) else {
+                gesture.isEnabled = false
+                gesture.isEnabled = true
+                return
+            }
+        case .changed:
+            splitLiftMoved(to: point)
+        case .ended:
+            guard splitLift != nil else { return }
+            splitLiftEnded(at: point)
+        case .cancelled, .failed:
+            splitLiftCancelled()
+        default:
+            break
+        }
+    }
+
+    /// The finger where the lift measures everything, in the floating button's own
+    /// host: the overlay's root view, which fills the screen in the interface's
+    /// orientation, as the windows' host does, and is the space the button is
+    /// placed and dragged in. Not the overlay window's base coordinates (a nil
+    /// view): on the iPhone Duo's inner display, mounted on its side, those came
+    /// out a quarter turned from the interface, which swapped the lift's x and y.
+    private func navAssistLiftPoint(_ gesture: UIGestureRecognizer) -> CGPoint {
+        gesture.location(in: gesture.view?.superview ?? windowHostingView)
+    }
+
     
     @objc private func navAssistTapped() {
         // The same feedback, at the same strength, as the bar's buttons: this is
@@ -7860,6 +7911,11 @@ private struct MultitaskHomeIcon: View {
 
     var body: some View {
         Button {
+            // Let go after carrying the app out: the end of that, not a press.
+            if dockManager.splitAppButtonTapSuppressed {
+                dockManager.splitAppButtonTapSuppressed = false
+                return
+            }
             MultitaskDockManager.buttonHaptic()
             // Out of this icon, the one pressed, even with the app's own on the
             // springboard page in view as well.
@@ -7883,6 +7939,8 @@ private struct MultitaskHomeIcon: View {
             }
         }
         .buttonStyle(.plain)
+        // Held and carried out: into Split View, on the side it is dropped on.
+        .modifier(SplitLiftGesture(dockAppUUID: app.appUUID))
         // Gone and back in the same frame the flight hands over in, so neither
         // the window nor the icon shows twice.
         .opacity(isStandingAside ? 0 : 1)
@@ -9443,6 +9501,17 @@ extension MultitaskDockManager {
         let center: CGPoint
         /// Where the finger came down.
         let start: CGPoint
+        /// From the finger to the lifted window's centre, where the window keeps
+        /// hold of the point it was picked up by (see `splitLiftGrabOffset`). Nil
+        /// for a lift from the bar, which hangs the window above the finger.
+        let grabOffset: CGPoint?
+        /// Whether the finger has carried the window anywhere yet. Held by the
+        /// point it was picked up by, a window can come up over a shelf already:
+        /// from the floating button at the screen's edge it shrinks towards that
+        /// side. So it aims at nothing until the finger has moved, and held and
+        /// let go where it was, it goes back rather than taking the side it came
+        /// up over. A window hung above the finger starts clear of the shelves.
+        private(set) var carried: Bool
         var target: SplitSide?
         /// How the window clipped before its corners were rounded for the lift: a
         /// guest window clips to its bounds already, a built-in page doesn't.
@@ -9454,18 +9523,42 @@ extension MultitaskDockManager {
         let from: SplitSide?
         let otherView: UIView?
         var previewing = false
+        /// The edge it came from, back at which the finger calls it off.
+        let origin: SplitLiftOrigin
 
-        init(uuid: String, view: UIView, center: CGPoint, start: CGPoint,
-             from: SplitSide?, otherView: UIView?) {
+        init(uuid: String, view: UIView, center: CGPoint, start: CGPoint, grabOffset: CGPoint?,
+             origin: SplitLiftOrigin, from: SplitSide?, otherView: UIView?) {
             self.uuid = uuid
             self.view = view
             self.center = center
             self.start = start
+            self.grabOffset = grabOffset
+            self.origin = origin
+            carried = grabOffset == nil
             self.from = from
             self.otherView = otherView
             masksToBounds = view.layer.masksToBounds
             cornerCurve = view.layer.cornerCurve
         }
+
+        /// Where the window is with the finger at `point`, for the half it is
+        /// over: its centre where it is held by the point it was picked up by,
+        /// else the finger, which it hangs centred above.
+        func aim(_ point: CGPoint) -> CGPoint {
+            guard let grabOffset else { return point }
+            return CGPoint(x: point.x + grabOffset.x, y: point.y + grabOffset.y)
+        }
+
+        /// Notes how far the finger at `point` has come (see `carried`).
+        func noteCarried(to point: CGPoint) {
+            if !carried, hypot(point.x - start.x, point.y - start.y) >= Self.carryDistance {
+                carried = true
+            }
+        }
+
+        /// How far the finger moves before a window held by its grab point aims
+        /// at anything: past a finger's wobble as it is held.
+        static let carryDistance: CGFloat = 20
 
         /// Square-cornered again, the way a window rests: the screen's corners and
         /// the divider round it where it lands.
@@ -9473,6 +9566,42 @@ extension MultitaskDockManager {
             view.layer.cornerRadius = 0
             view.layer.masksToBounds = masksToBounds
             view.layer.cornerCurve = cornerCurve
+        }
+    }
+
+    /// Where a lift came from: the screen edge nearest the finger as it came down
+    /// (the floating button's, the dock's, the bar's, a handle's), and how far in
+    /// from it. Brought back that close to it, the finger calls the lift off and
+    /// the app goes back as it was: the user has changed their mind.
+    struct SplitLiftOrigin {
+        enum Edge { case left, right, top, bottom }
+        let edge: Edge
+        let depth: CGFloat
+
+        init(start: CGPoint, in bounds: CGRect) {
+            let distances: [(edge: Edge, distance: CGFloat)] = [
+                (.left, start.x - bounds.minX), (.right, bounds.maxX - start.x),
+                (.top, start.y - bounds.minY), (.bottom, bounds.maxY - start.y),
+            ]
+            let nearest = distances.min { $0.distance < $1.distance } ?? (.bottom, 0)
+            edge = nearest.edge
+            depth = max(nearest.distance, 0)
+        }
+
+        /// How far in from its edge the finger calls the lift off: a little past
+        /// where it came down, so a lift starts called off until the finger
+        /// leaves the control it came from.
+        var reach: CGFloat { max(depth + 44, 72) }
+
+        func callsOff(_ point: CGPoint, in bounds: CGRect) -> Bool {
+            let distance: CGFloat
+            switch edge {
+            case .left: distance = point.x - bounds.minX
+            case .right: distance = bounds.maxX - point.x
+            case .top: distance = point.y - bounds.minY
+            case .bottom: distance = bounds.maxY - point.y
+            }
+            return distance < reach
         }
     }
 
@@ -9805,9 +9934,14 @@ extension MultitaskDockManager {
     }
 
     /// The held app button dragged: the app in use lifts off the screen.
-    func splitLiftBegan(at point: CGPoint) -> Bool {
+    ///
+    /// - Parameter keepingGrabPoint: the window shrinks about the point under the
+    ///   finger and keeps hold of it, for a control that can be anywhere on the
+    ///   screen (the floating button). The bar's button, along the bottom, hangs
+    ///   the window above the finger instead.
+    func splitLiftBegan(at point: CGPoint, keepingGrabPoint: Bool = false) -> Bool {
         guard splitLiftArmed, let uuid = frontmostAppUUID,
-              beginSplitLift(of: uuid, at: point) else { return false }
+              beginSplitLift(of: uuid, at: point, keepingGrabPoint: keepingGrabPoint) else { return false }
         splitAppButtonTapSuppressed = true
         return true
     }
@@ -9824,15 +9958,18 @@ extension MultitaskDockManager {
     /// screen's, as iOS shows an app being moved. Where it can go is shown as it
     /// goes: on its own, a shelf at each side; beside another app, the other side
     /// only, marked as a swap, and over it the app there moves across to show it.
-    private func beginSplitLift(of uuid: String, at point: CGPoint) -> Bool {
+    private func beginSplitLift(of uuid: String, at point: CGPoint,
+                                keepingGrabPoint: Bool = false) -> Bool {
         guard splitLift == nil, canSplitNow, !isHomeState, !isAppSwitcherOpen,
               let view = splitWindow(of: uuid), !view.isHidden, view.alpha > 0.1,
               !LCMinimizeToIconAnimator.holdsGeometry(of: view) else { return false }
         UIImpactFeedbackGenerator(style: .medium).impactOccurred()
         let from = splitPair?.side(of: uuid)
         let other = from.flatMap { splitPair?.app(on: $0.opposite) }.flatMap { splitWindow(of: $0) }
+        let grabOffset = keepingGrabPoint ? splitLiftGrabOffset(of: view, at: point) : nil
+        let origin = SplitLiftOrigin(start: point, in: CGRect(origin: .zero, size: splitHostSize))
         let lift = SplitLift(uuid: uuid, view: view, center: view.center, start: point,
-                             from: from, otherView: other)
+                             grabOffset: grabOffset, origin: origin, from: from, otherView: other)
         splitLift = lift
         view.superview?.bringSubviewToFront(view)
         // In the window's own space, so shrunk with it they are the screen's
@@ -9847,7 +9984,11 @@ extension MultitaskDockManager {
         // Out of the way while the app is in the air: they go back to where the
         // two are once it lands.
         syncSplitChrome()
-        showSplitShelves(for: lift)
+        // The home screen, blurred, round the app in the air rather than black:
+        // the picture a swipe along the bar shows, drawn ahead of time and small,
+        // so a lift costs no drawing. The app beside it stays in view.
+        showBlurredSpringboard(behind: view, keeping: other, in: windowHostingView)
+        showSplitShelves(from: lift.from, swapping: lift.otherView != nil, under: lift.view)
         moveSplitLift(to: point, animated: true)
         return true
     }
@@ -9856,24 +9997,42 @@ extension MultitaskDockManager {
         moveSplitLift(to: point, animated: false)
     }
 
-    /// Let go: on a shelf, or flung towards one, the app takes that side, or
-    /// swaps sides with the app beside it, and is the one in use; anywhere else it
-    /// goes back.
-    func splitLiftEnded(at point: CGPoint, velocity: CGFloat) {
+    /// From the finger to the centre of `view` lifted, held by the point it was
+    /// picked up by (`SplitLift.grabOffset`): the point under the finger, or with
+    /// the finger off the window, the point of it nearest the finger a little in
+    /// from its edge. The floating button can be over the other app of two side
+    /// by side; held from there, the window hung off to one side of the finger,
+    /// and from a button at the screen's edge there was no room to carry it the
+    /// other way. Now it comes to the finger as it shrinks.
+    private func splitLiftGrabOffset(of view: UIView, at point: CGPoint) -> CGPoint {
+        // Where it rests, whatever it is drawn at just now.
+        let center = view.center
+        let size = view.bounds.size
+        func held(_ value: CGFloat, centre: CGFloat, length: CGFloat) -> CGFloat {
+            let low = centre - length / 2, high = centre + length / 2
+            guard value < low || value > high else { return value }
+            let inset = length * 0.1
+            return min(max(value, low + inset), high - inset)
+        }
+        let grab = CGPoint(x: held(point.x, centre: center.x, length: size.width),
+                           y: held(point.y, centre: center.y, length: size.height))
+        // Shrunk about its centre, `grab` ends up this far from it.
+        let scale = Self.splitLiftScale
+        return CGPoint(x: (center.x - grab.x) * scale, y: (center.y - grab.y) * scale)
+    }
+
+    /// Let go: over a half with a shelf, the app takes that side, or swaps sides
+    /// with the app beside it, and is the one in use; over its own half, or with
+    /// the finger back at the edge it came from, it goes back (`splitDropSide`).
+    func splitLiftEnded(at point: CGPoint) {
         guard let lift = splitLift else { return }
         splitLift = nil
         splitLiftArmed = false
         releaseAppButtonTapSoon()
-        // Which shelf it was let go over, while the shelves are still up: which
-        // are up is what decides where it can go.
-        let shelves = Set(splitShelves.keys)
-        var side = splitShelfSide(at: point)
+        // Decided while the shelves are still up: which are up is what decides
+        // where it can go.
+        let side = splitLiftSide(lift, at: point)
         hideSplitShelves()
-        let travelled = hypot(point.x - lift.start.x, point.y - lift.start.y)
-        if side == nil, travelled > 40, abs(velocity) > 900 {
-            let flung: SplitSide = velocity < 0 ? .left : .right
-            if shelves.contains(flung) { side = flung }
-        }
         let next: SplitPair?
         if let side, canSplitNow {
             if let pair = splitPair, let from = pair.side(of: lift.uuid) {
@@ -9909,6 +10068,7 @@ extension MultitaskDockManager {
             if self.splitLift?.view !== lift.view { lift.restoreCorners() }
             self.splitSettlingCount = max(self.splitSettlingCount - 1, 0)
             self.syncSplitChrome()
+            self.liftLandedOverBlurredSpringboard()
         }
         for uuid in next.members {
             if let other = lift.otherView, splitWindow(of: uuid) === other, lift.previewing {
@@ -9934,6 +10094,275 @@ extension MultitaskDockManager {
         settleSplitLift(lift)
     }
 
+    // MARK: Lifting an app out of the home dock
+
+    /// A running app held in the home dock and carried out of it, on the home
+    /// screen: a picture of the app, at the size an app is lifted at, comes out of
+    /// its icon under the finger, and a shelf comes up at each side. Dropped on one,
+    /// the app opens on that side out of the picture, and the other side shows the
+    /// apps to choose from, as "Open in Split View" does; let go anywhere else, the
+    /// picture goes back into the icon.
+    final class DockLift {
+        let uuid: String
+        let picture: UIView
+        /// Where the dock's icon is, for the picture to come out of and go back into.
+        let iconFrame: CGRect?
+        /// Where the finger came down.
+        let start: CGPoint
+        /// From the finger to the picture's centre: the picture is held as the app
+        /// would be, lifted from the whole screen at the point the finger is on.
+        let grabOffset: CGPoint
+        /// Whether the finger has carried it anywhere yet (see `SplitLift.carried`).
+        var carried = false
+        var target: SplitSide?
+        /// The dock's edge, back at which the finger calls it off.
+        let origin: SplitLiftOrigin
+
+        init(uuid: String, picture: UIView, iconFrame: CGRect?, start: CGPoint, grabOffset: CGPoint,
+             origin: SplitLiftOrigin) {
+            self.uuid = uuid
+            self.picture = picture
+            self.iconFrame = iconFrame
+            self.start = start
+            self.grabOffset = grabOffset
+            self.origin = origin
+        }
+
+        func center(at point: CGPoint) -> CGPoint {
+            CGPoint(x: point.x + grabOffset.x, y: point.y + grabOffset.y)
+        }
+    }
+
+    /// The home dock's icon held long enough to be carried out, if it can be: two
+    /// apps can go side by side here and now, and the app is still running.
+    func dockLiftArm(uuid: String) -> Bool {
+        guard canSplitNow, isHomeState, !isAppSwitcherOpen, splitLift == nil, dockLift == nil,
+              apps.contains(where: { $0.appUUID == uuid }) else { return false }
+        dockLiftArmed = uuid
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        return true
+    }
+
+    func dockLiftDisarm() {
+        dockLiftArmed = nil
+    }
+
+    /// The held icon dragged: the app's picture comes out of it under the finger.
+    func dockLiftBegan(uuid: String, at point: CGPoint) -> Bool {
+        guard dockLiftArmed == uuid, dockLift == nil, splitLift == nil, canSplitNow, isHomeState,
+              !isAppSwitcherOpen, let app = apps.first(where: { $0.appUUID == uuid }),
+              let host = windowHostingView.superview else { return false }
+        UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+        // Laid out as the whole screen and shrunk as an app is lifted.
+        let size = splitHostSize
+        let picture = makeDockLiftPicture(for: app, size: size)
+        picture.bounds = CGRect(origin: .zero, size: size)
+        picture.center = CGPoint(x: size.width / 2, y: size.height / 2)
+        let scale = Self.splitLiftScale
+        let grabOffset = CGPoint(x: (size.width / 2 - point.x) * scale,
+                                 y: (size.height / 2 - point.y) * scale)
+        let iconFrame = app.springboardItemID.flatMap { homeDockIconFrames[$0] }
+        let lift = DockLift(uuid: uuid, picture: picture, iconFrame: iconFrame,
+                            start: point, grabOffset: grabOffset,
+                            origin: SplitLiftOrigin(start: point, in: CGRect(origin: .zero, size: size)))
+        dockLift = lift
+        // Let go over the icon, its press is the end of the lift, not a tap.
+        splitAppButtonTapSuppressed = true
+        // Out of the icon, as tall as it, fading in as it grows.
+        let source = iconFrame ?? CGRect(x: point.x - 30, y: point.y - 30, width: 60, height: 60)
+        picture.transform = dockLiftTransform(onto: source, size: size)
+        picture.alpha = 0
+        showDockLiftBackdrop()
+        showSplitShelves(from: nil, swapping: false)
+        // In front of everything, the shelves included: it is what is being
+        // carried, and the frosted shelves would hide it as it passed under them.
+        host.addSubview(picture)
+        moveDockLift(to: point, animated: true)
+        return true
+    }
+
+    func dockLiftMoved(to point: CGPoint) {
+        moveDockLift(to: point, animated: false)
+    }
+
+    /// Let go over a half, the app opens on that side; with the finger back at
+    /// the dock's edge, its picture goes back into the dock (`splitDropSide`).
+    func dockLiftEnded(at point: CGPoint) {
+        guard let lift = dockLift else { return }
+        dockLift = nil
+        dockLiftArmed = nil
+        releaseAppButtonTapSoon()
+        let side = dockLiftSide(lift, at: point)
+        hideSplitShelves()
+        guard let side, canSplitNow, isHomeState, !isAppSwitcherOpen,
+              apps.contains(where: { $0.appUUID == lift.uuid }) else {
+            returnDockLiftPicture(lift)
+            return
+        }
+        // Where the picture is, for the window to start from: exactly over it, at
+        // the same size and corners.
+        let scale = Self.splitLiftScale
+        let size = lift.picture.bounds.size
+        let center = lift.center(at: point)
+        let rect = CGRect(x: center.x - size.width * scale / 2, y: center.y - size.height * scale / 2,
+                          width: size.width * scale, height: size.height * scale)
+        // As "Open in Split View" opens an app that is running already, on the
+        // side it was dropped on.
+        endSplit()
+        splitPair = SplitPair.empty.with(lift.uuid, on: side)
+        relayoutSplitWindow(of: lift.uuid, animated: false)
+        syncSplitChrome()
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        let opened = bringMultitaskViewToFront(uuid: lift.uuid, fromRect: rect,
+                                               fromRectRadius: deviceScreenCornerRadius * scale)
+        guard opened else {
+            splitPair = nil
+            syncSplitChrome()
+            returnDockLiftPicture(lift)
+            return
+        }
+        hideDockLiftBackdrop(duration: 0.35)
+        // The window takes over where the picture is.
+        UIView.animate(withDuration: 0.12, delay: 0.04, options: [.allowUserInteraction]) {
+            lift.picture.alpha = 0
+        } completion: { _ in
+            lift.picture.removeFromSuperview()
+        }
+    }
+
+    /// The lift taken away from the finger: the picture goes back into the dock.
+    func dockLiftCancelled() {
+        dockLiftArmed = nil
+        guard let lift = dockLift else { return }
+        dockLift = nil
+        releaseAppButtonTapSoon()
+        hideSplitShelves()
+        returnDockLiftPicture(lift)
+    }
+
+    private func moveDockLift(to point: CGPoint, animated: Bool) {
+        guard let lift = dockLift else { return }
+        let size = lift.picture.bounds.size
+        let scale = Self.splitLiftScale
+        let center = lift.center(at: point)
+        let transform = CGAffineTransform(translationX: center.x - size.width / 2,
+                                          y: center.y - size.height / 2)
+            .scaledBy(x: scale, y: scale)
+        let target = dockLiftSide(lift, at: point)
+        let apply = {
+            lift.picture.transform = transform
+            lift.picture.alpha = 1
+            self.highlightSplitShelves(target)
+        }
+        if animated {
+            UIView.animate(withDuration: 0.35, delay: 0, usingSpringWithDamping: 0.85,
+                           initialSpringVelocity: 0,
+                           options: [.allowUserInteraction, .beginFromCurrentState],
+                           animations: apply)
+        } else {
+            apply()
+        }
+        if target != lift.target {
+            lift.target = target
+            if target != nil { UISelectionFeedbackGenerator().selectionChanged() }
+        }
+    }
+
+    /// The side the picture is over once it has been carried (`splitDropSide`).
+    private func dockLiftSide(_ lift: DockLift, at point: CGPoint) -> SplitSide? {
+        if !lift.carried,
+           hypot(point.x - lift.start.x, point.y - lift.start.y) >= SplitLift.carryDistance {
+            lift.carried = true
+        }
+        guard lift.carried else { return nil }
+        return splitDropSide(aim: lift.center(at: point), finger: point, origin: lift.origin)
+    }
+
+    /// Back into the dock's icon, fading as it goes, and gone.
+    private func returnDockLiftPicture(_ lift: DockLift) {
+        hideDockLiftBackdrop()
+        let size = lift.picture.bounds.size
+        let back = lift.iconFrame.map { dockLiftTransform(onto: $0, size: size) }
+        UIView.animate(withDuration: 0.3, delay: 0, usingSpringWithDamping: 0.9,
+                       initialSpringVelocity: 0, options: [.beginFromCurrentState]) {
+            if let back { lift.picture.transform = back }
+            lift.picture.alpha = 0
+        } completion: { _ in
+            lift.picture.removeFromSuperview()
+        }
+    }
+
+    /// Puts the whole-screen-sized picture over `rect`, as tall as it.
+    private func dockLiftTransform(onto rect: CGRect, size: CGSize) -> CGAffineTransform {
+        let scale = max(rect.height, 1) / max(size.height, 1)
+        return CGAffineTransform(translationX: rect.midX - size.width / 2, y: rect.midY - size.height / 2)
+            .scaledBy(x: scale, y: scale)
+    }
+
+    /// The home screen frosted and dimmed behind the lift, so the shelves and the
+    /// picture stand clear of its wallpaper and icons. Over the home screen and
+    /// under the windows: an app opened on a side grows out over it.
+    private func showDockLiftBackdrop() {
+        guard let host = windowHostingView.superview else { return }
+        dockLiftBackdrop?.removeFromSuperview()
+        let backdrop = UIVisualEffectView(effect: nil)
+        backdrop.frame = host.bounds
+        backdrop.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        backdrop.isUserInteractionEnabled = false
+        let dim = UIView(frame: backdrop.bounds)
+        dim.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        dim.backgroundColor = .black
+        dim.alpha = 0
+        backdrop.contentView.addSubview(dim)
+        host.insertSubview(backdrop, belowSubview: windowHostingView)
+        dockLiftBackdrop = backdrop
+        // Through its blur, not its alpha, under which a blur draws wrongly.
+        UIView.animate(withDuration: 0.3, delay: 0, options: [.allowUserInteraction]) {
+            backdrop.effect = UIBlurEffect(style: .systemUltraThinMaterialDark)
+            dim.alpha = 0.25
+        }
+    }
+
+    private func hideDockLiftBackdrop(duration: TimeInterval = 0.3) {
+        guard let backdrop = dockLiftBackdrop else { return }
+        dockLiftBackdrop = nil
+        UIView.animate(withDuration: duration, delay: 0,
+                       options: [.allowUserInteraction, .beginFromCurrentState]) {
+            backdrop.effect = nil
+            backdrop.contentView.subviews.forEach { $0.alpha = 0 }
+        } completion: { _ in
+            backdrop.removeFromSuperview()
+        }
+    }
+
+    /// What is carried out of the dock: the app's last picture, with the screen's
+    /// corners, or its icon on black for an app with no picture yet.
+    private func makeDockLiftPicture(for app: DockAppModel, size: CGSize) -> UIView {
+        let picture = UIView(frame: CGRect(origin: .zero, size: size))
+        picture.backgroundColor = .black
+        picture.isUserInteractionEnabled = false
+        picture.layer.cornerRadius = deviceScreenCornerRadius
+        picture.layer.cornerCurve = .continuous
+        picture.layer.masksToBounds = true
+        if let image = appSnapshotImages[app.appUUID] {
+            let imageView = UIImageView(image: image)
+            imageView.contentMode = .scaleAspectFill
+            imageView.frame = picture.bounds
+            imageView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+            picture.addSubview(imageView)
+        } else if let icon = SwitcherBarContentView.cachedIcon(for: app) {
+            let side = min(size.width, size.height) * 0.25
+            let iconView = UIImageView(image: icon)
+            iconView.frame = CGRect(x: (size.width - side) / 2, y: (size.height - side) / 2,
+                                    width: side, height: side)
+            iconView.layer.cornerRadius = side * 0.225
+            iconView.layer.cornerCurve = .continuous
+            iconView.layer.masksToBounds = true
+            picture.addSubview(iconView)
+        }
+        return picture
+    }
+
     private func settleSplitLift(_ lift: SplitLift) {
         // What is drawn around the two waits for it to be back in its place.
         splitSettlingCount += 1
@@ -9947,7 +10376,16 @@ extension MultitaskDockManager {
             if self.splitLift?.view !== lift.view { lift.restoreCorners() }
             self.splitSettlingCount = max(self.splitSettlingCount - 1, 0)
             self.syncSplitChrome()
+            self.liftLandedOverBlurredSpringboard()
         }
+    }
+
+    /// The app in its place again: the blurred springboard goes, for the black
+    /// that letterboxes the windows at rest. Not while another lift or a swipe
+    /// along the bar has taken it up since, which takes it away itself.
+    private func liftLandedOverBlurredSpringboard() {
+        guard splitLift == nil, quickSwitch.drag == nil, quickSwitch.settling == nil else { return }
+        hideBlurredSpringboard()
     }
 
     /// The button's own tap, if the finger is let go over it, comes in the same
@@ -9962,18 +10400,17 @@ extension MultitaskDockManager {
         guard let lift = splitLift else { return }
         let scale = Self.splitLiftScale
         // Shrunk about its centre and held just above the finger, as iOS holds an
-        // app being moved.
-        let center = CGPoint(x: point.x, y: point.y - lift.view.bounds.height * scale * 0.4)
+        // app being moved; or by the point it was picked up by.
+        let center = lift.grabOffset == nil
+            ? CGPoint(x: point.x, y: point.y - lift.view.bounds.height * scale * 0.4)
+            : lift.aim(point)
         let transform = CGAffineTransform(translationX: center.x - lift.center.x,
                                           y: center.y - lift.center.y)
             .scaledBy(x: scale, y: scale)
-        let target = splitShelfSide(at: point)
+        let target = splitLiftSide(lift, at: point)
         let apply = {
             lift.view.transform = transform
-            for (side, shelf) in self.splitShelves {
-                shelf.alpha = side == target ? 1 : 0.6
-                shelf.transform = side == target ? CGAffineTransform(scaleX: 1.04, y: 1.04) : .identity
-            }
+            self.highlightSplitShelves(target)
         }
         if animated {
             UIView.animate(withDuration: 0.35, delay: 0, usingSpringWithDamping: 0.85,
@@ -9989,16 +10426,22 @@ extension MultitaskDockManager {
         }
         // Beside another app and over its side: that app moves across to where
         // this one was, so the swap is seen before the finger lets go, and back
-        // again once the finger leaves.
+        // again once the finger leaves. Its side's shelf goes while it is away:
+        // the place is plainly free for the app being carried, which takes it.
         if let from = lift.from, let other = lift.otherView {
             let previewing = target == from.opposite
             if previewing != lift.previewing {
                 lift.previewing = previewing
                 let shift = splitPaneFrame(from).minX - splitPaneFrame(from.opposite).minX
+                let shelf = splitShelves[from.opposite]
                 UIView.animate(withDuration: 0.4, delay: 0, usingSpringWithDamping: 0.85,
                                initialSpringVelocity: 0,
                                options: [.allowUserInteraction, .beginFromCurrentState]) {
                     other.transform = previewing ? CGAffineTransform(translationX: shift, y: 0) : .identity
+                }
+                UIView.animate(withDuration: 0.2, delay: 0,
+                               options: [.allowUserInteraction, .beginFromCurrentState]) {
+                    shelf?.setShown(!previewing)
                 }
             }
         }
@@ -10014,58 +10457,81 @@ extension MultitaskDockManager {
                       width: width, height: height)
     }
 
-    /// Which of the shelves up `point` is over, with some room round each to catch
-    /// a finger that is nearly there. None reaches the app button, in the side
-    /// column or the bar along the bottom, nor a side's handle, so the app is not
-    /// over one as it is lifted.
-    private func splitShelfSide(at point: CGPoint) -> SplitSide? {
-        splitShelves.keys.first { splitShelfFrame($0).insetBy(dx: -40, dy: -50).contains(point) }
+    /// The side a lifted app goes to with the finger at `finger` and the app
+    /// centred at `aim`: the half of the screen the app is over, anywhere from the
+    /// middle out, where that side has a shelf (beside another app, only the other
+    /// side does). None with the finger back at the edge the lift came from,
+    /// which calls it off: the app goes back as it was.
+    private func splitDropSide(aim: CGPoint, finger: CGPoint, origin: SplitLiftOrigin) -> SplitSide? {
+        let bounds = CGRect(origin: .zero, size: splitHostSize)
+        guard !origin.callsOff(finger, in: bounds) else { return nil }
+        let side: SplitSide = aim.x < bounds.midX ? .left : .right
+        return splitShelves[side] != nil ? side : nil
+    }
+
+    /// The side the window is over once it has been carried (`splitDropSide`).
+    private func splitLiftSide(_ lift: SplitLift, at point: CGPoint) -> SplitSide? {
+        lift.noteCarried(to: point)
+        guard lift.carried else { return nil }
+        return splitDropSide(aim: lift.aim(point), finger: point, origin: lift.origin)
     }
 
     /// The shelves for `lift`: one at each side for an app on its own; beside
     /// another app, the other side's only, marked with iOS's swap arrows where an
     /// app is there to swap with, since dropping on its own side changes nothing.
-    private func showSplitShelves(for lift: SplitLift) {
+    /// - Parameters:
+    ///   - from: the side the app is on already, which gets no shelf.
+    ///   - swapping: an app is on the other side, to swap with.
+    ///   - lifted: the window being carried. The shelves go among the windows,
+    ///     just under it: frosted, they would hide it as it passed under them,
+    ///     and what is carried stays in front. Without one (an app carried out
+    ///     of the home dock, whose picture is put on top of everything) they go
+    ///     over the windows.
+    private func showSplitShelves(from: SplitSide?, swapping: Bool, under lifted: UIView? = nil) {
         guard let host = windowHostingView.superview else { return }
-        let sides: [SplitSide] = lift.from.map { [$0.opposite] } ?? SplitSide.allCases
+        let among = lifted.flatMap { $0.superview === windowHostingView ? $0 : nil }
+        let sides: [SplitSide] = from.map { [$0.opposite] } ?? SplitSide.allCases
         for side in sides where splitShelves[side] == nil {
             let symbol: String
-            if lift.otherView != nil {
+            if swapping {
                 symbol = "arrow.left.arrow.right"
             } else {
                 symbol = side == .left ? "rectangle.lefthalf.inset.filled" : "rectangle.righthalf.inset.filled"
             }
-            let shelf = UIView(frame: windowHostingView.convert(splitShelfFrame(side), to: host))
-            shelf.backgroundColor = UIColor(white: 1, alpha: 0.16)
-            shelf.layer.cornerRadius = 26
-            shelf.layer.cornerCurve = .continuous
-            shelf.layer.borderWidth = 1
-            shelf.layer.borderColor = UIColor(white: 1, alpha: 0.4).cgColor
-            shelf.isUserInteractionEnabled = false
-            let glyph = UIImageView(image: UIImage(
-                systemName: symbol,
-                withConfiguration: UIImage.SymbolConfiguration(pointSize: 28, weight: .medium)))
-            glyph.tintColor = UIColor(white: 1, alpha: 0.95)
-            glyph.sizeToFit()
-            glyph.center = CGPoint(x: shelf.bounds.midX, y: shelf.bounds.midY)
-            shelf.addSubview(glyph)
-            shelf.alpha = 0
-            host.addSubview(shelf)
-            splitShelves[side] = shelf
+            if let among {
+                let shelf = SplitShelfView(frame: splitShelfFrame(side), symbol: symbol)
+                // Marked first, so the host never takes it for a window.
+                windowHostingView.liftChromeViews = (windowHostingView.liftChromeViews ?? []) + [shelf as UIView]
+                windowHostingView.insertSubview(shelf, belowSubview: among)
+                splitShelves[side] = shelf
+            } else {
+                let shelf = SplitShelfView(frame: windowHostingView.convert(splitShelfFrame(side), to: host),
+                                           symbol: symbol)
+                host.addSubview(shelf)
+                splitShelves[side] = shelf
+            }
         }
         arrangeSplitChrome()
         UIView.animate(withDuration: 0.25, delay: 0, options: [.allowUserInteraction]) {
-            for shelf in self.splitShelves.values { shelf.alpha = 0.6 }
+            for shelf in self.splitShelves.values { shelf.setShown(true) }
         }
+    }
+
+    /// The shelf aimed at stands out; the others wait.
+    private func highlightSplitShelves(_ target: SplitSide?) {
+        for (side, shelf) in splitShelves { shelf.setAimed(side == target) }
     }
 
     private func hideSplitShelves() {
         let shelves = Array(splitShelves.values)
         splitShelves = [:]
         UIView.animate(withDuration: 0.2, animations: {
-            shelves.forEach { $0.alpha = 0 }
+            shelves.forEach { $0.setShown(false) }
         }, completion: { _ in
             shelves.forEach { $0.removeFromSuperview() }
+            // Only these: another lift's may be up already.
+            let host = self.windowHostingView
+            host.liftChromeViews = (host.liftChromeViews ?? []).filter { $0.superview === host }
         })
     }
 
@@ -10322,8 +10788,8 @@ extension MultitaskDockManager {
                     self?.splitHandleLiftBegan(side, at: point) ?? false
                 }
                 handle.onLiftMoved = { [weak self] point in self?.splitLiftMoved(to: point) }
-                handle.onLiftEnded = { [weak self] point, velocity in
-                    self?.splitLiftEnded(at: point, velocity: velocity)
+                handle.onLiftEnded = { [weak self] point, _ in
+                    self?.splitLiftEnded(at: point)
                 }
                 handle.onLiftCancelled = { [weak self] in self?.splitLiftCancelled() }
                 host.addSubview(handle)
@@ -10810,13 +11276,28 @@ extension MultitaskDockManager {
 /// the finger, to be dropped on a side of an iPhone Duo opened out. iOS lifts an
 /// app the same way, with a swipe up from its home indicator held a moment; here
 /// the app button is the home indicator, since that swipe is iOS's own.
+///
+/// The same press and drag on a running app's icon in the home dock carries that
+/// app out of the dock instead (`dockAppUUID`, see `MultitaskDockManager.DockLift`).
 @available(iOS 16.0, *)
 private struct SplitLiftGesture: ViewModifier {
-    @EnvironmentObject var dockManager: MultitaskDockManager
+    /// The running app a home dock icon stands for; nil for the app button, which
+    /// lifts the app in use.
+    let dockAppUUID: String?
+    /// The one manager there is, which is also what the bar is handed as its
+    /// environment object; read directly so the home dock, which is not, can use
+    /// this too.
+    private var dockManager: MultitaskDockManager { .shared }
     @State private var reading = SplitLiftReading()
     /// True while the press is live, so a gesture the system takes over, which
     /// SwiftUI never ends, still puts the app back.
     @GestureState private var isPressing = false
+
+    /// Written out: with private state beside it, the one Swift would make is
+    /// private too, and the home dock's icon could not call it.
+    init(dockAppUUID: String? = nil) {
+        self.dockAppUUID = dockAppUUID
+    }
 
     func body(content: Content) -> some View {
         content.simultaneousGesture(
@@ -10827,31 +11308,25 @@ private struct SplitLiftGesture: ViewModifier {
                     guard case .second(true, let drag) = value else { return }
                     if !reading.armed {
                         reading.armed = true
-                        reading.canLift = dockManager.splitLiftArm()
+                        reading.canLift = arm()
                     }
                     guard reading.canLift, let drag else { return }
                     if !reading.lifted {
-                        reading.lifted = dockManager.splitLiftBegan(at: drag.startLocation)
+                        reading.lifted = begin(at: drag.startLocation)
                         if !reading.lifted { reading.canLift = false }
                     }
-                    if reading.lifted { dockManager.splitLiftMoved(to: drag.location) }
+                    if reading.lifted { move(to: drag.location) }
                 }
                 .onEnded { value in
                     defer { reading.reset() }
                     guard reading.lifted else {
-                        if reading.armed { dockManager.splitLiftDisarm() }
+                        if reading.armed { disarm() }
                         return
                     }
                     if case .second(true, let drag?) = value {
-                        let velocity: CGFloat
-                        if #available(iOS 17.0, *) {
-                            velocity = drag.velocity.width
-                        } else {
-                            velocity = (drag.predictedEndLocation.x - drag.location.x) * 4
-                        }
-                        dockManager.splitLiftEnded(at: drag.location, velocity: velocity)
+                        end(at: drag.location)
                     } else {
-                        dockManager.splitLiftCancelled()
+                        cancel()
                     }
                 }
         )
@@ -10865,15 +11340,46 @@ private struct SplitLiftGesture: ViewModifier {
     /// Puts back what a cancelled lift moved, a turn of the run loop later: a
     /// press that ended has been through onEnded by then.
     private func cancelUnended() {
-        let reading = reading, dockManager = dockManager
+        let reading = reading, gesture = self
         DispatchQueue.main.async {
             defer { reading.reset() }
             if reading.lifted {
-                dockManager.splitLiftCancelled()
+                gesture.cancel()
             } else if reading.armed {
-                dockManager.splitLiftDisarm()
+                gesture.disarm()
             }
         }
+    }
+
+    // The lift this press drives: the app in use's, or a dock app's.
+
+    private func arm() -> Bool {
+        dockAppUUID.map { dockManager.dockLiftArm(uuid: $0) } ?? dockManager.splitLiftArm()
+    }
+
+    private func disarm() {
+        if dockAppUUID != nil { dockManager.dockLiftDisarm() } else { dockManager.splitLiftDisarm() }
+    }
+
+    private func begin(at point: CGPoint) -> Bool {
+        if let uuid = dockAppUUID { return dockManager.dockLiftBegan(uuid: uuid, at: point) }
+        return dockManager.splitLiftBegan(at: point)
+    }
+
+    private func move(to point: CGPoint) {
+        if dockAppUUID != nil { dockManager.dockLiftMoved(to: point) } else { dockManager.splitLiftMoved(to: point) }
+    }
+
+    private func end(at point: CGPoint) {
+        if dockAppUUID != nil {
+            dockManager.dockLiftEnded(at: point)
+        } else {
+            dockManager.splitLiftEnded(at: point)
+        }
+    }
+
+    private func cancel() {
+        if dockAppUUID != nil { dockManager.dockLiftCancelled() } else { dockManager.splitLiftCancelled() }
     }
 }
 
@@ -11096,6 +11602,73 @@ final class SplitDividerView: UIView {
 /// The handle under one of two apps side by side, where its home indicator
 /// would be on a Duo of its own: swiped up, or tapped, that side shows the apps
 /// to choose from.
+/// A side's drop zone while an app is lifted: dark frosted, outlined and marked,
+/// so it reads over anything under it, the home screen's wallpaper and icons
+/// included. Shown and aimed at through its blur and its marks, never its own
+/// alpha, under which a blur draws wrongly.
+final class SplitShelfView: UIView {
+    private static let cornerRadius: CGFloat = 26
+    private static let blurEffect = UIBlurEffect(style: .systemThinMaterialDark)
+
+    private let blur = UIVisualEffectView(effect: nil)
+    private let fill = UIView()
+    private let outline = UIView()
+    private let glyph: UIImageView
+    private var isShown = false
+
+    init(frame: CGRect, symbol: String) {
+        glyph = UIImageView(image: UIImage(
+            systemName: symbol,
+            withConfiguration: UIImage.SymbolConfiguration(pointSize: 34, weight: .semibold)))
+        super.init(frame: frame)
+        isUserInteractionEnabled = false
+        for part in [blur, fill, outline] {
+            part.frame = bounds
+            part.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+            part.layer.cornerRadius = Self.cornerRadius
+            part.layer.cornerCurve = .continuous
+            part.isUserInteractionEnabled = false
+            addSubview(part)
+        }
+        blur.clipsToBounds = true
+        fill.backgroundColor = .white
+        outline.layer.borderWidth = 2
+        outline.layer.borderColor = UIColor.white.cgColor
+        glyph.tintColor = .white
+        glyph.sizeToFit()
+        glyph.center = CGPoint(x: bounds.midX, y: bounds.midY)
+        glyph.autoresizingMask = [.flexibleLeftMargin, .flexibleRightMargin,
+                                  .flexibleTopMargin, .flexibleBottomMargin]
+        addSubview(glyph)
+        applyMarks(aimed: false)
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    /// Up or gone, in whatever animation it is called in.
+    func setShown(_ shown: Bool) {
+        isShown = shown
+        blur.effect = shown ? Self.blurEffect : nil
+        applyMarks(aimed: false)
+    }
+
+    /// The one the app is over: brighter, and a little bigger. The blur is left
+    /// alone, so aiming never restarts it.
+    func setAimed(_ aimed: Bool) {
+        guard isShown else { return }
+        applyMarks(aimed: aimed)
+    }
+
+    private func applyMarks(aimed: Bool) {
+        fill.alpha = !isShown ? 0 : aimed ? 0.24 : 0.06
+        outline.alpha = !isShown ? 0 : aimed ? 1 : 0.7
+        glyph.alpha = !isShown ? 0 : aimed ? 1 : 0.9
+        transform = aimed ? CGAffineTransform(scaleX: 1.05, y: 1.05) : .identity
+    }
+}
+
 final class SplitHandleView: UIView {
     var onUse: (() -> Void)?
     /// Lifting the app from the handle: where the finger is, in the window.
@@ -11137,7 +11710,10 @@ final class SplitHandleView: UIView {
     /// aside: the app lifts, as iOS lifts an app with a swipe up from its home
     /// indicator held a moment, and the drag carries it from there.
     @objc private func panned(_ pan: UIPanGestureRecognizer) {
-        let point = pan.location(in: nil)
+        // In the view it stands in, the space the windows are placed in, rather
+        // than the window's base coordinates, which on the iPhone Duo's inner
+        // display can come out a quarter turned (see `navAssistLiftPoint`).
+        let point = pan.location(in: superview)
         let translation = pan.translation(in: self)
         switch pan.state {
         case .changed:
@@ -11155,7 +11731,7 @@ final class SplitHandleView: UIView {
             pause?.invalidate()
             if lifting {
                 lifting = false
-                onLiftEnded?(point, pan.velocity(in: nil).x)
+                onLiftEnded?(point, pan.velocity(in: superview).x)
                 return
             }
             let velocity = pan.velocity(in: self)
@@ -11178,7 +11754,7 @@ final class SplitHandleView: UIView {
         pause = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: false) { [weak self, weak pan] _ in
             guard let self, let pan, !self.lifting,
                   pan.state == .began || pan.state == .changed else { return }
-            self.beginLift(at: pan.location(in: nil))
+            self.beginLift(at: pan.location(in: self.superview))
         }
     }
 
@@ -11186,5 +11762,17 @@ final class SplitHandleView: UIView {
         pause?.invalidate()
         lifting = onLiftBegan?(point) ?? false
         if lifting { onLiftMoved?(point) }
+    }
+}
+
+@available(iOS 16.0, *)
+extension MultitaskDockManager: UIGestureRecognizerDelegate {
+    /// The floating button's lift starts only where it can lift something; a
+    /// hold anywhere else is left to the drag that moves the button.
+    public func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
+        guard gestureRecognizer is UILongPressGestureRecognizer,
+              gestureRecognizer.view === navAssistButton else { return true }
+        return !isNavAssistStashed && canSplitNow && !isHomeState && !isAppSwitcherOpen
+            && splitLift == nil
     }
 }
