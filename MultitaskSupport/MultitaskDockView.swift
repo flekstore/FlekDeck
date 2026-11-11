@@ -1388,6 +1388,15 @@ class AppInfoProvider {
     /// Told by a guest's window whenever the app's own side bar changes, packed as
     /// LCGuestSideBar packs it; 0 for an app with none, or none any more.
     @objc public func setGuestSideBar(_ state: UInt64, forAppUUID appUUID: String) {
+        // On the main thread, whoever tells: what it decides moves the side
+        // column and the floating button. A guest's notices arrive there, but its
+        // clean-up as it ends (`-[AppSceneViewController appTerminationCleanUp]`)
+        // comes on the extension's own queue, and laying the button out from
+        // there tripped the main-thread assertion.
+        guard Thread.isMainThread else {
+            DispatchQueue.main.async { self.setGuestSideBar(state, forAppUUID: appUUID) }
+            return
+        }
         if state == 0 {
             guestSideBars[appUUID] = nil
         } else {
