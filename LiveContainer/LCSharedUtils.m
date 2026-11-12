@@ -44,7 +44,8 @@ NSString* FBSOpenApplicationOptionKeyPayloadURL = @"__PayloadURL";
         void* taskSelf = SecTaskCreateFromSelf(NULL);
         CFErrorRef error = NULL;
         CFTypeRef cfans = SecTaskCopyValueForEntitlement(taskSelf, CFSTR("com.apple.developer.team-identifier"), &error);
-        if(CFGetTypeID(cfans) == CFStringGetTypeID()) {
+        // NULL where the signature has no team: CFGetTypeID would trap on it.
+        if(cfans && CFGetTypeID(cfans) == CFStringGetTypeID()) {
             ans = (__bridge NSString*)cfans;
         }
         CFRelease(taskSelf);
@@ -52,7 +53,11 @@ NSString* FBSOpenApplicationOptionKeyPayloadURL = @"__PayloadURL";
         if(!ans) {
             // the above seems not to work if the device is jailbroken by Palera1n, so we use the public api one as backup
             // https://stackoverflow.com/a/11841898
-            NSString *tempAccountName = @"bundleSeedID";
+            // Named for this process. A guest comes here as it starts (in the
+            // simulator, always), and two starting together, as a pair opening
+            // in Split View, shared one item: one added it, the other's add
+            // failed as a duplicate, and that guest was left with no team.
+            NSString *tempAccountName = [NSString stringWithFormat:@"bundleSeedID.%d", getpid()];
             NSDictionary *query = @{
                 (__bridge NSString *)kSecClass : (__bridge NSString *)kSecClassGenericPassword,
                 (__bridge NSString *)kSecAttrAccount : tempAccountName,

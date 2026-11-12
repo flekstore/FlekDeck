@@ -666,10 +666,20 @@ static UIDeviceOrientation LCDeviceOrientationForInterface(UIInterfaceOrientatio
 }
 
 - (void)setUpAppPresenter {
+    // Queued as the guest started, so the guest can be gone by now: closed with
+    // its window, or ended as it started (a crash at launch). A scene for a
+    // process that is not there is a trap in FrontBoard that takes FlekDeck
+    // down with it, so the window closes as for any guest that ends. A guest
+    // still running but not found is ended too, rather than left behind.
+    if(self.isAppTerminationCleanUpCalled) return;
     RBSProcessPredicate* predicate = [PrivClass(RBSProcessPredicate) predicateMatchingIdentifier:@(self.pid)];
     FBProcessManager *manager = [PrivClass(FBProcessManager) sharedInstance];
     // At this point, the process is spawned and we're ready to create a scene to render in our app
     RBSProcessHandle* processHandle = [PrivClass(RBSProcessHandle) handleForPredicate:predicate error:nil];
+    if(!processHandle.identity) {
+        [self terminate];
+        return;
+    }
     [manager registerProcessForAuditToken:processHandle.auditToken];
     UIApplicationSceneSpecification *specification = [UIApplicationSceneSpecification specification];
     
