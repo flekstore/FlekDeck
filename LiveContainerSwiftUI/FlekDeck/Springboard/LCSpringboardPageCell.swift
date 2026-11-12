@@ -64,6 +64,12 @@ final class LCSpringboardPageCell: UICollectionViewCell {
     /// Strip left clear at the foot of a phone page for the page dots, which
     /// the springboard draws along the bottom of its own view.
     private static let phoneBottomReserve: CGFloat = 30
+    /// The largest card the phone grid gives: the widest iPhone's, 440pt across.
+    /// Wider pages still on the phone grid — FlekDeck beside another app on an
+    /// iPad, Slide Over, a Stage Manager window short of the iPad grid — keep
+    /// that size, the grid centred in the room to spare, rather than three
+    /// columns stretched until one icon fills a third of the window.
+    private static let phoneMaxCellWidth: CGFloat = 122
 
     /// Narrowest page that gets the iPad grid, on any device. Below it — an iPhone
     /// held upright, Slide Over, a small Stage Manager window — the phone's three
@@ -146,8 +152,21 @@ final class LCSpringboardPageCell: UICollectionViewCell {
         pageSize.width >= padMinWidth
     }
 
+    /// The narrowest page the landscape grid's six columns fit across, each at
+    /// its smallest, with a phone's margins either side: 820pt. A wide page short
+    /// of that — FlekDeck in two thirds of an iPad, beside another app — takes
+    /// the upright grid's four columns instead. Six would run past its edges:
+    /// the margin that centres them came out below nothing, and the row was
+    /// pinned to the left edge. The upright grid holds as many icons, so nothing
+    /// moves between pages.
+    private static var padLandscapeMinWidth: CGFloat {
+        let columns = CGFloat(padLandscapeGrid.columns)
+        return columns * padCellWidthRange.lowerBound + (columns - 1) * padMinSpacing
+            + phoneSideMargin * 2
+    }
+
     private static func padGrid(forPageSize size: CGSize) -> (columns: Int, rows: Int) {
-        size.width > size.height ? padLandscapeGrid : padPortraitGrid
+        size.width > size.height && size.width >= padLandscapeMinWidth ? padLandscapeGrid : padPortraitGrid
     }
 
     static func columns(forPageSize size: CGSize) -> Int {
@@ -166,7 +185,7 @@ final class LCSpringboardPageCell: UICollectionViewCell {
             let cols = CGFloat(phoneColumns)
             let totalSpacing: CGFloat = phoneSpacing * (cols - 1)
             let availableWidth = screenWidth - (phoneSideMargin * 2) - totalSpacing
-            return floor(availableWidth / cols)
+            return min(floor(availableWidth / cols), phoneMaxCellWidth)
         }
         let target = padColumnPitch(forPageSize: size) * padCellWidthFraction
         return floor(min(max(target, padCellWidthRange.lowerBound), padCellWidthRange.upperBound))
