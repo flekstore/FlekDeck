@@ -70,6 +70,23 @@ final class LCSpringboardIconCell: UICollectionViewCell {
         return iv
     }()
 
+    /// Under the title of an app paired with another, so that opening either
+    /// opens both side by side: a link, then the other app's icon, small.
+    private let pairBadge: UIImageView = {
+        let iv = UIImageView()
+        iv.tintColor = .secondaryLabel
+        iv.contentMode = .center
+        iv.isHidden = true
+        return iv
+    }()
+
+    private let pairPartnerIcon: UIImageView = {
+        let iv = UIImageView()
+        iv.contentMode = .scaleAspectFit
+        iv.isHidden = true
+        return iv
+    }()
+
     /// The red count on the icon's corner, as an iOS home screen badges an app:
     /// Settings shows 1 while no certificate is imported. A label rather than
     /// an image, so a count of two digits widens into a capsule.
@@ -211,6 +228,10 @@ final class LCSpringboardIconCell: UICollectionViewCell {
     private static let labelTopSpacingFraction: CGFloat = 8.0 / 110.0
     /// 11pt against the design's card, and the same share of a wider one.
     private static let labelFontFraction: CGFloat = 11.0 / 110.0
+    /// The pair row under the title, in the 16pt the design's card leaves
+    /// below it: the other app's icon 11pt across, the link 9pt.
+    private static let pairIconFraction: CGFloat = 11.0 / 110.0
+    private static let pairGlyphFraction: CGFloat = 9.0 / 110.0
     /// The squircle's corner as a share of its side — the same ratio
     /// `LCMinimizeToIconAnimator` rounds a landing window to.
     private static let iconCornerFraction: CGFloat = 0.2237
@@ -232,6 +253,7 @@ final class LCSpringboardIconCell: UICollectionViewCell {
         CGSize(width: (cardWidth * Self.labelWidthFraction).rounded(),
                height: (cardWidth * Self.labelHeightFraction).rounded())
     }
+    private var pairIconSize: CGFloat { (cardWidth * Self.pairIconFraction).rounded() }
     private var labelTopSpacing: CGFloat {
         (cardWidth * Self.labelTopSpacingFraction).rounded()
     }
@@ -279,6 +301,8 @@ final class LCSpringboardIconCell: UICollectionViewCell {
         contentView.addSubview(nameLabel)
         contentView.addSubview(singleBadge)
         contentView.addSubview(jitBadge)
+        contentView.addSubview(pairBadge)
+        contentView.addSubview(pairPartnerIcon)
         contentView.addSubview(notificationBadge)
         contentView.addSubview(deleteButton)
 
@@ -427,6 +451,20 @@ final class LCSpringboardIconCell: UICollectionViewCell {
         )
         // JIT badge (top-left corner of glass card)
         jitBadge.frame = CGRect(x: 8, y: 8, width: badgeSize, height: badgeSize)
+        // Pair row: the link, then the other app's icon, centred under the
+        // title in the room left below it, so the icon and title stay where
+        // every other card has them.
+        let pairIconS = pairIconSize
+        let glyph = pairBadge.image?.size ?? CGSize(width: pairIconS, height: pairIconS)
+        let pairSpacing: CGFloat = 2
+        let rowCenterY = ((nameLabel.frame.maxY + bounds.maxY) / 2).rounded()
+        let rowWidth = glyph.width + (pairPartnerIcon.isHidden ? 0 : pairSpacing + pairIconS)
+        let rowX = (bounds.midX - rowWidth / 2).rounded()
+        pairBadge.frame = CGRect(x: rowX, y: (rowCenterY - glyph.height / 2).rounded(),
+                                 width: glyph.width, height: glyph.height)
+        pairPartnerIcon.frame = CGRect(x: rowX + glyph.width + pairSpacing,
+                                       y: (rowCenterY - pairIconS / 2).rounded(),
+                                       width: pairIconS, height: pairIconS)
 
         // Notification badge: hung off the icon's top-right corner the way iOS
         // hangs one, mostly over the icon. A count wider than a circle grows
@@ -533,6 +571,9 @@ final class LCSpringboardIconCell: UICollectionViewCell {
         singleBadge.isHidden = true
         jitBadge.isHidden = true
         jitBadge.alpha = 1
+        pairBadge.isHidden = true
+        pairPartnerIcon.isHidden = true
+        pairPartnerIcon.image = nil
         setNotificationCount(0)
         installOverlay.isHidden = true
         spinnerRingView.isHidden = true
@@ -613,6 +654,7 @@ final class LCSpringboardIconCell: UICollectionViewCell {
             isPlaceholderCell = true
         }
         setNotificationCount(notificationCount)
+        setPairRow(for: item, darkMode: darkMode)
     }
 
     /// Shows `count` in the notification badge, or no badge at all for 0.
@@ -669,6 +711,42 @@ final class LCSpringboardIconCell: UICollectionViewCell {
     private func showBadges(for app: LCAppModel) {
         singleBadge.isHidden = !FlekLaunchModeStore.shared.showsSingleBadge(for: app)
         jitBadge.isHidden = !app.uiIsJITNeeded
+    }
+
+    /// The pair row under the title: the link, and the icon of the app this
+    /// one opens beside; the link alone if that app is not on the home screen.
+    private func setPairRow(for item: FlekHomeItem, darkMode: Bool) {
+        let partnerID = item.splitPartnerID
+        let partner = partnerID.flatMap { id in
+            LCSpringboardViewController.current?.flatItems.first { $0.id == id }
+        }
+        pairBadge.isHidden = partnerID == nil
+        if partnerID != nil {
+            let glyphSize = (cardWidth * Self.pairGlyphFraction).rounded()
+            pairBadge.image = UIImage(systemName: "link",
+                                      withConfiguration: UIImage.SymbolConfiguration(pointSize: glyphSize,
+                                                                                     weight: .semibold))
+        }
+        pairPartnerIcon.image = partner.flatMap { Self.smallIcon(for: $0, size: pairIconSize, darkMode: darkMode) }
+        pairPartnerIcon.isHidden = pairBadge.isHidden || pairPartnerIcon.image == nil
+        setNeedsLayout()
+    }
+
+    /// An app's or built-in page's icon `size` points across, rounded as on its
+    /// card: for the pair row, and for menus that list apps.
+    static func smallIcon(for item: FlekHomeItem, size: CGFloat, darkMode: Bool) -> UIImage? {
+        let radius = iconCornerRadius(forIconSize: size)
+        let scale = FlekTheme.screen.scale
+        switch item {
+        case .installed(let app):
+            return roundedImage(app.appInfo.iconIsDarkIcon(darkMode), size: size, radius: radius, scale: scale,
+                                cacheKey: (app.appInfo.relativeBundlePath).map { "app:\($0):\(app.uiIsShared):\(darkMode)" })
+        case .defaultApp(let kind):
+            return roundedImage(UIImage(named: kind.iconAssetName), size: size, radius: radius, scale: scale,
+                                cacheKey: "builtin:\(kind.iconAssetName)")
+        default:
+            return nil
+        }
     }
 
     /// Update just the install state (progress/icon) without full reconfigure.

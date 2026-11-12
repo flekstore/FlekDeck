@@ -80,6 +80,14 @@ final class LCSpringboardViewController: UIViewController {
         setupOuterCollectionView()
         setupPageControl()
         setupDragManager()
+        // A pair made or broken, in Split View or from an icon's menu: its two
+        // icons gain or lose the link and partner icon under their names.
+        NotificationCenter.default.addObserver(self, selector: #selector(splitPairsChanged),
+                                               name: FlekSplitPairStore.didChange, object: nil)
+    }
+
+    @objc private func splitPairsChanged() {
+        refreshVisibleItems()
     }
 
     deinit {

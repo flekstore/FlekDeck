@@ -9578,8 +9578,9 @@ private final class QuickSwitchSwipeReading {
 ///   apps to choose from there;
 /// - the app in use, lifted and dropped on the other side, swaps sides;
 /// - the divider, dragged off either edge, puts that side's app away and leaves
-///   the other the screen. Tapped, it pairs the two: opening either opens both
-///   from then on, until the divider parts them again.
+///   the other the screen. Tapped, it opens a menu: pair the two, so opening
+///   either opens both from then on, until they are unpaired or the divider
+///   parts them; swap their sides; or close either.
 ///
 /// Over when either app is put away or closed, when a third comes forward, on the
 /// way home. Folded, or turned upright while open, the app last used fills the
@@ -9764,7 +9765,6 @@ extension MultitaskDockManager {
     static let splitMinimumWidth: CGFloat = 640
     /// How far an app shrinks as it is lifted.
     static let splitLiftScale: CGFloat = 0.5
-    private static let splitPairsKey = "FlekSplitPairs"
     static let splitFractionsKey = "FlekSplitFractions"
     private static let splitIconCache = NSCache<NSString, UIImage>()
 
@@ -9789,14 +9789,19 @@ extension MultitaskDockManager {
         windowHostingView.window?.bounds.size ?? windowHostingView.bounds.size
     }
 
+    /// Whether two apps go side by side here at all, however the display is held
+    /// now: apps open in windows, on an iPad or the Duo's inner display. Where
+    /// they do, the home screen's icons offer to pair two.
+    var supportsSplit: Bool {
+        isDockEnabled() && DataManager.shared.model.multiLCStatus != 2 && isSplitDisplay
+    }
+
     /// Whether two apps can be put side by side now: apps open in windows, on an
     /// iPad or the Duo's inner display, held wide, and wide enough. An iPad turned
     /// upright, or FlekDeck's window made narrow beside other apps, is a Duo
     /// folded: one app at a time, the two together again once it is wide.
     var canSplitNow: Bool {
-        guard isDockEnabled(), DataManager.shared.model.multiLCStatus != 2, isSplitDisplay else {
-            return false
-        }
+        guard supportsSplit else { return false }
         let size = splitHostSize
         return size.width > size.height && size.width >= Self.splitMinimumWidth
     }
@@ -9815,8 +9820,7 @@ extension MultitaskDockManager {
     /// so. Nil where they can, and where the question does not arise: a display
     /// that never holds two, or apps not opened in windows at all.
     var splitUnavailability: SplitUnavailability? {
-        guard isSplitDisplay, isDockEnabled(), DataManager.shared.model.multiLCStatus != 2,
-              !canSplitNow else { return nil }
+        guard supportsSplit, !canSplitNow else { return nil }
         let size = splitHostSize
         return size.width > size.height ? .narrow : .upright
     }
@@ -10361,6 +10365,7 @@ extension MultitaskDockManager {
         // divider: it waits for the app to have grown back into its side.
         splitSettlingCount += 1
         splitPair = next
+        turnSavedSplitPairToSides()
         UIImpactFeedbackGenerator(style: .light).impactOccurred()
         UIView.animate(withDuration: 0.4, delay: 0, usingSpringWithDamping: 0.9,
                        initialSpringVelocity: 0,
@@ -11064,6 +11069,7 @@ extension MultitaskDockManager {
                                                             action: #selector(splitDividerPanned(_:))))
         divider.addGestureRecognizer(UITapGestureRecognizer(target: self,
                                                             action: #selector(splitDividerTapped)))
+        divider.menuProvider = { [weak self] in self?.splitDividerMenu() }
         splitDivider = divider
         return divider
     }
@@ -11450,14 +11456,32 @@ extension MultitaskDockManager {
 
     /// Pairs of apps that open together, as home screen items, left then right.
     private var savedSplitPairs: [[String]] {
-        get { (LCUtils.appGroupUserDefault.array(forKey: Self.splitPairsKey) as? [[String]]) ?? [] }
-        set { LCUtils.appGroupUserDefault.set(newValue, forKey: Self.splitPairsKey) }
+        get { FlekSplitPairStore.shared.pairs }
+        set { FlekSplitPairStore.shared.pairs = newValue }
     }
 
-    private var isSplitPairSaved: Bool {
+    /// The two side by side as home screen items, left then right, where each
+    /// side has an app.
+    private var splitPairItemIDs: (left: String, right: String)? {
         guard let pair = splitPair, let left = pair.left, let right = pair.right,
-              let leftID = splitItemID(of: left), let rightID = splitItemID(of: right) else { return false }
-        return savedSplitPairs.contains([leftID, rightID])
+              let leftID = splitItemID(of: left), let rightID = splitItemID(of: right) else { return nil }
+        return (leftID, rightID)
+    }
+
+    /// Whether the two side by side are paired, whichever way round.
+    private var isSplitPairSaved: Bool {
+        guard let ids = splitPairItemIDs else { return false }
+        return savedSplitPairs.contains { $0.count == 2 && $0.contains(ids.left) && $0.contains(ids.right) }
+    }
+
+    /// The two's pair, if they have one, turned the way round they are now: the
+    /// way they open next time.
+    private func turnSavedSplitPairToSides() {
+        guard let ids = splitPairItemIDs else { return }
+        var pairs = savedSplitPairs
+        guard let index = pairs.firstIndex(of: [ids.right, ids.left]) else { return }
+        pairs[index] = [ids.left, ids.right]
+        savedSplitPairs = pairs
     }
 
     /// The app `itemID` is paired with, and the side it opens on.
@@ -11473,19 +11497,124 @@ extension MultitaskDockManager {
         savedSplitPairs = savedSplitPairs.filter { !($0.contains(a) && $0.contains(b)) }
     }
 
-    /// The divider tapped: the two are paired, and from now on opening either
-    /// opens both, each on its side. An app is in one pair at a time.
-    @objc private func splitDividerTapped() {
-        guard isSplitShowing, let pair = splitPair, let left = pair.left, let right = pair.right,
-              let leftID = splitItemID(of: left), let rightID = splitItemID(of: right) else { return }
-        if !isSplitPairSaved {
-            var pairs = savedSplitPairs.filter { !$0.contains(leftID) && !$0.contains(rightID) }
-            pairs.append([leftID, rightID])
-            savedSplitPairs = pairs
-        }
+    /// The two paired from the divider's menu: from now on opening either opens
+    /// both, each on its side. An app is in one pair at a time.
+    private func pairSplitApps() {
+        guard let ids = splitPairItemIDs else { return }
+        FlekSplitPairStore.shared.pair(ids.left, ids.right)
         UINotificationFeedbackGenerator().notificationOccurred(.success)
         splitDivider?.showsPaired = true
-        splitDivider?.bounce()
+    }
+
+    /// Unpaired from the divider's menu: each opens on its own again. The two
+    /// stay side by side.
+    private func unpairSplitApps() {
+        guard let ids = splitPairItemIDs else { return }
+        forgetSplitPair(ids.left, ids.right)
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        splitDivider?.showsPaired = false
+    }
+
+    // MARK: The divider's menu
+
+    /// The divider tapped: its menu, as iPadOS opens a menu from a window's
+    /// controls. Not while it is being let go of after a drag.
+    @objc private func splitDividerTapped() {
+        guard isSplitShowing, splitLift == nil, let divider = splitDivider,
+              divider.transform == .identity else { return }
+        divider.showMenu()
+    }
+
+    /// What the divider's menu offers for the two beside it: to pair them, or
+    /// unpair them, to swap their sides, and to close either. Built as it opens,
+    /// for what is on each side then. Beside the apps to choose from, only the
+    /// swap and the app's own side.
+    private func splitDividerMenu() -> UIMenu? {
+        guard isSplitShowing, splitLift == nil, let pair = splitPair else { return nil }
+        var arrange: [UIMenuElement] = []
+        if splitPairItemIDs != nil {
+            if isSplitPairSaved {
+                arrange.append(UIAction(title: "lc.flek.splitMenu.unpair".loc,
+                                        subtitle: "lc.flek.splitMenu.unpairDetail".loc,
+                                        image: UIImage(systemName: "personalhotspot.slash")
+                                            ?? UIImage(systemName: "xmark")) { [weak self] _ in
+                    self?.unpairSplitApps()
+                })
+            } else {
+                arrange.append(UIAction(title: "lc.flek.splitMenu.pair".loc,
+                                        subtitle: "lc.flek.splitMenu.pairDetail".loc,
+                                        image: UIImage(systemName: "link")) { [weak self] _ in
+                    self?.pairSplitApps()
+                })
+            }
+        }
+        arrange.append(UIAction(title: "lc.flek.splitMenu.swap".loc,
+                                image: UIImage(systemName: "rectangle.2.swap")) { [weak self] _ in
+            self?.swapSplitSides()
+        })
+        var close: [UIMenuElement] = []
+        for side in SplitSide.allCases where pair.app(on: side) != nil {
+            let title = side == .left ? "lc.flek.splitMenu.closeLeft".loc : "lc.flek.splitMenu.closeRight".loc
+            close.append(UIAction(title: title, image: UIImage(systemName: "xmark")) { [weak self] _ in
+                self?.closeSplitSideFromMenu(side)
+            })
+        }
+        return UIMenu(title: "", children: [
+            UIMenu(title: "", options: .displayInline, children: arrange),
+            UIMenu(title: "", options: .displayInline, children: close),
+        ])
+    }
+
+    /// The two swap sides from the divider's menu, each sliding across to the
+    /// other's; on an iPad the sides keep their sizes (see `splitFoldFraction`).
+    /// Paired, they open this way round from now on. Beside the apps to choose
+    /// from, the app and the apps change sides.
+    private func swapSplitSides() {
+        guard isSplitShowing, splitLift == nil, let pair = splitPair else { return }
+        let next = pair.swapped
+        // An app chosen for the other side and still starting goes where that
+        // side has gone.
+        if let launch = splitLaunch {
+            splitLaunch = SplitLaunch(side: launch.side.opposite, itemID: launch.itemID, source: nil)
+        }
+        // The apps to choose from go while the app crosses, and come back on
+        // the other side once it has. Two apps cross with all else left as it
+        // is: the divider stays where it is, and each side keeps its handle.
+        let settles = next.choosingSide != nil
+        if settles { splitSettlingCount += 1 }
+        splitPair = next
+        turnSavedSplitPairToSides()
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        for uuid in next.members { relayoutSplitWindow(of: uuid, animated: true) }
+        syncSplitChrome()
+        guard settles else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in
+            guard let self else { return }
+            self.splitSettlingCount = max(self.splitSettlingCount - 1, 0)
+            self.syncSplitChrome()
+        }
+    }
+
+    /// A side closed from the divider's menu, as it closes when the divider is
+    /// let go across it: the side goes dark, its app is put away, still
+    /// running, and the other app grows over the screen.
+    private func closeSplitSideFromMenu(_ side: SplitSide) {
+        guard isSplitShowing, splitLift == nil, splitPair?.app(on: side) != nil else { return }
+        if splitCurtain == nil, let host = windowHostingView.superview {
+            let curtain = UIView()
+            curtain.backgroundColor = .black
+            curtain.isUserInteractionEnabled = false
+            curtain.alpha = 0
+            curtain.frame = windowHostingView.convert(splitPaneFrame(side), to: host)
+            host.addSubview(curtain)
+            splitCurtain = curtain
+            arrangeSplitChrome()
+        }
+        // Faded with the side, rather than gone from the middle all at once.
+        if let divider = splitDivider {
+            UIView.animate(withDuration: 0.15) { divider.alpha = 0 }
+        }
+        closeSplitSide(side)
     }
 
     /// Whether `uuid` is paired with another app, and so has to open beside it.
@@ -11988,22 +12117,69 @@ private struct SplitPickerCell: View {
 /// corners that round each app off on its side of it, and a handle to drag.
 /// Drawn over the two windows rather than cut out of them, so whatever a window
 /// is doing — opening out of an icon, flying home — its own corners are left
-/// alone. Turns FlekDeck's blue once the two are paired.
-final class SplitDividerView: UIView {
+/// alone. Tapped, it opens a menu for the two (`showMenu`); while they are
+/// paired, the handle parts round a small link.
+final class SplitDividerView: UIView, UIContextMenuInteractionDelegate {
     /// The corners each app is rounded off by beside the fold.
     static let cornerRadius: CGFloat = 14
-    private static let pairedColor = UIColor(red: 0, green: 117 / 255, blue: 1, alpha: 1)
+    /// The handle's grey: white at 0.55 over the line's black, but opaque, so
+    /// its two halves can overlap unseen.
+    private static let handleColor = UIColor(white: 0.55, alpha: 1)
+    private static let handleLength: CGFloat = 44
+    /// From the middle of the handle to each half's inner end while the two are
+    /// paired: room for the link, and a little either side of it.
+    private static let linkClearance: CGFloat = 10
+    /// The link stood upright, one loop above the other, to fit inside the gap:
+    /// the symbol leans from bottom left to top right.
+    private static let linkUpright = CGAffineTransform(rotationAngle: -.pi / 4)
+    private static let presentMenuSelector = NSSelectorFromString("_presentMenuAtLocation:")
+    /// Whether a tap can open the menu: through the call UIKit itself opens a
+    /// button's menu with. Where it cannot, holding the line opens it instead.
+    private static let opensMenuOnTap =
+        UIContextMenuInteraction.instancesRespond(to: SplitDividerView.presentMenuSelector)
 
     let gap: CGFloat
+    /// The two are paired, and opening either opens both. Shown in the handle:
+    /// its two halves part, and a link stands between them.
     var showsPaired = false {
         didSet {
             guard showsPaired != oldValue else { return }
-            handle.backgroundColor = showsPaired ? Self.pairedColor : UIColor(white: 1, alpha: 0.55)
             accessibilityValue = showsPaired ? "Paired" : nil
+            let shown = showsPaired
+            let apply = {
+                self.layoutHandle()
+                self.link.alpha = shown ? 1 : 0
+                self.link.transform = shown ? Self.linkUpright : Self.linkUpright.scaledBy(x: 0.5, y: 0.5)
+            }
+            // Parting where it can be seen; set as it is otherwise.
+            if window != nil, !isHidden, alpha > 0.01 {
+                UIView.animate(withDuration: 0.45, delay: 0,
+                               usingSpringWithDamping: shown ? 0.7 : 1, initialSpringVelocity: 0,
+                               options: [.allowUserInteraction, .beginFromCurrentState],
+                               animations: apply)
+            } else {
+                UIView.performWithoutAnimation(apply)
+            }
         }
     }
+    /// What the menu offers, asked for as it opens: it depends on what is on
+    /// each side at the time.
+    var menuProvider: (() -> UIMenu?)?
+
     private let shape = CAShapeLayer()
-    private let handle = UIView()
+    /// The handle, in two halves, which overlap into one while the two are not
+    /// paired.
+    private let handleTop = UIView()
+    private let handleBottom = UIView()
+    private let link = UIImageView(image: UIImage(systemName: "link",
+                                                  withConfiguration: UIImage.SymbolConfiguration(pointSize: 10,
+                                                                                                 weight: .semibold)))
+    /// What the menu hangs from: the handle.
+    private let menuAnchor = UIView()
+    private lazy var menuInteraction = UIContextMenuInteraction(delegate: self)
+    /// A tap asked for the menu. A finger held on the line is a drag that has
+    /// yet to move, and opens nothing.
+    private var menuRequested = false
 
     init(gap: CGFloat) {
         self.gap = gap
@@ -12011,13 +12187,24 @@ final class SplitDividerView: UIView {
         backgroundColor = .clear
         shape.fillColor = UIColor.black.cgColor
         layer.addSublayer(shape)
-        handle.backgroundColor = UIColor(white: 1, alpha: 0.55)
-        handle.layer.cornerRadius = 2
-        handle.isUserInteractionEnabled = false
-        addSubview(handle)
+        for half in [handleTop, handleBottom] {
+            half.backgroundColor = Self.handleColor
+            half.layer.cornerRadius = 2
+            half.isUserInteractionEnabled = false
+            addSubview(half)
+        }
+        link.tintColor = Self.handleColor
+        link.contentMode = .center
+        link.isUserInteractionEnabled = false
+        link.alpha = 0
+        link.transform = Self.linkUpright.scaledBy(x: 0.5, y: 0.5)
+        addSubview(link)
+        menuAnchor.isUserInteractionEnabled = false
+        addSubview(menuAnchor)
+        addInteraction(menuInteraction)
         isAccessibilityElement = true
         accessibilityLabel = "Split View Divider"
-        accessibilityHint = "Tap to pair the two apps."
+        accessibilityHint = "Shows options for the two apps."
         accessibilityTraits = .button
     }
 
@@ -12052,26 +12239,97 @@ final class SplitDividerView: UIView {
         shape.frame = bounds
         shape.path = path.cgPath
         CATransaction.commit()
-        handle.bounds = CGRect(x: 0, y: 0, width: 4, height: 44)
-        handle.center = CGPoint(x: bounds.midX, y: bounds.midY)
+        layoutHandle()
+        menuAnchor.frame = CGRect(x: bounds.midX - 16, y: bounds.midY - Self.handleLength / 2 - 6,
+                                  width: 32, height: Self.handleLength + 12)
     }
 
-    /// A little jump of the handle, for the tap that pairs the two.
-    func bounce() {
-        UIView.animate(withDuration: 0.12, animations: {
-            self.handle.transform = CGAffineTransform(scaleX: 1.6, y: 1.25)
-        }, completion: { _ in
-            UIView.animate(withDuration: 0.3, delay: 0, usingSpringWithDamping: 0.5,
-                           initialSpringVelocity: 0, options: [], animations: {
-                self.handle.transform = .identity
-            })
-        })
+    /// The handle's halves: apart round the link while the two are paired, and
+    /// otherwise overlapping into one, far enough that each half's rounded inner
+    /// end lies along the other's straight, so no waist shows where they meet.
+    private func layoutHandle() {
+        let mid = CGPoint(x: bounds.midX, y: bounds.midY)
+        let half = Self.handleLength / 2
+        let inner = showsPaired ? -Self.linkClearance : 4
+        handleTop.frame = CGRect(x: mid.x - 2, y: mid.y - half, width: 4, height: half + inner)
+        handleBottom.frame = CGRect(x: mid.x - 2, y: mid.y - inner, width: 4, height: half + inner)
+        link.center = mid
     }
 
     /// The gap and a few points either side of it: enough to take hold of,
     /// without taking touches meant for the apps' edges.
     override func point(inside point: CGPoint, with event: UIEvent?) -> Bool {
         abs(point.x - bounds.midX) <= gap / 2 + 8 && point.y >= 0 && point.y <= bounds.height
+    }
+
+    // MARK: The menu
+
+    /// Opens the menu, hanging from the handle as a button's menu hangs from
+    /// the button.
+    func showMenu() {
+        guard Self.opensMenuOnTap, window != nil else { return }
+        let selector = Self.presentMenuSelector
+        guard let implementation = menuInteraction.method(for: selector) else { return }
+        layoutIfNeeded()
+        menuRequested = true
+        typealias Present = @convention(c) (AnyObject, Selector, CGPoint) -> Void
+        let present = unsafeBitCast(implementation, to: Present.self)
+        present(menuInteraction, selector, CGPoint(x: menuAnchor.frame.midX, y: menuAnchor.frame.midY))
+    }
+
+    func contextMenuInteraction(_ interaction: UIContextMenuInteraction,
+                                configurationForMenuAtLocation location: CGPoint) -> UIContextMenuConfiguration? {
+        guard menuRequested || !Self.opensMenuOnTap, let menu = menuProvider?() else { return nil }
+        let configuration = UIContextMenuConfiguration(identifier: nil, previewProvider: nil) { _ in menu }
+        // Pairing first and closing last, whether the menu opens above the
+        // handle or below it.
+        if #available(iOS 16.0, *) { configuration.preferredMenuElementOrder = .fixed }
+        return configuration
+    }
+
+    @available(iOS 16.0, *)
+    func contextMenuInteraction(_ interaction: UIContextMenuInteraction,
+                                configuration: UIContextMenuConfiguration,
+                                highlightPreviewForItemWithIdentifier identifier: any NSCopying) -> UITargetedPreview? {
+        menuAnchorPreview()
+    }
+
+    @available(iOS 16.0, *)
+    func contextMenuInteraction(_ interaction: UIContextMenuInteraction,
+                                configuration: UIContextMenuConfiguration,
+                                dismissalPreviewForItemWithIdentifier identifier: any NSCopying) -> UITargetedPreview? {
+        menuAnchorPreview()
+    }
+
+    func contextMenuInteraction(_ interaction: UIContextMenuInteraction,
+                                willEndFor configuration: UIContextMenuConfiguration,
+                                animator: (any UIContextMenuInteractionAnimating)?) {
+        menuRequested = false
+    }
+
+    /// The menu hangs from the handle as a button's does, rather than the whole
+    /// line lifting out of the screen, as a view held for its menu does: UIKit's
+    /// own compact layout, where it has it.
+    @objc(_contextMenuInteraction:styleForMenuWithConfiguration:)
+    func contextMenuStyle(_ interaction: UIContextMenuInteraction,
+                          configuration: UIContextMenuConfiguration) -> NSObject? {
+        let defaultStyle = NSSelectorFromString("defaultStyle")
+        guard let styleClass = NSClassFromString("_UIContextMenuStyle") as? NSObject.Type,
+              styleClass.responds(to: defaultStyle),
+              let style = styleClass.perform(defaultStyle)?.takeUnretainedValue() as? NSObject,
+              style.responds(to: NSSelectorFromString("setPreferredLayout:")) else { return nil }
+        style.setValue(3, forKey: "preferredLayout")
+        return style
+    }
+
+    /// Clear: the menu only needs somewhere to hang from.
+    private func menuAnchorPreview() -> UITargetedPreview? {
+        guard menuAnchor.window != nil else { return nil }
+        let parameters = UIPreviewParameters()
+        parameters.backgroundColor = .clear
+        parameters.visiblePath = UIBezierPath(roundedRect: menuAnchor.bounds,
+                                              cornerRadius: menuAnchor.bounds.width / 2)
+        return UITargetedPreview(view: menuAnchor, parameters: parameters)
     }
 }
 

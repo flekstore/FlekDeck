@@ -1580,15 +1580,85 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
     // MARK: - UIKit Context Menu (for UIKit springboard)
 
     /// An icon's menu, with "Open in Split View" added where two apps can be put
-    /// side by side: on an iPad or an iPhone Duo opened out, held wide.
+    /// side by side: on an iPad or an iPhone Duo opened out, held wide. An app
+    /// paired with another also has the app it opens beside, and Unpair; one
+    /// that is not has Pair With, wherever two apps can ever go side by side.
     func homeUIMenu(for item: FlekHomeItem) -> UIMenu? {
         let menu = homeUIMenuItems(for: item)
-        guard #available(iOS 16.0, *), let split = openInSplitViewAction(for: item) else { return menu }
+        var added: [UIMenuElement] = []
+        if #available(iOS 16.0, *), let split = openInSplitViewAction(for: item) { added.append(split) }
+        if let pair = splitPairMenu(for: item) { added.append(pair) }
+        guard !added.isEmpty else { return menu }
         var children = menu?.children ?? []
         // Below the launch modes where an app's menu starts with them.
         let index = (children.first as? UIMenu)?.options.contains(.displayInline) == true ? 1 : 0
-        children.insert(split, at: index)
+        children.insert(contentsOf: added, at: index)
         return UIMenu(title: menu?.title ?? "", children: children)
+    }
+
+    /// "Paired with" the app this one opens beside, over Unpair: the pair the
+    /// icon marks under its title. Not paired, Pair With instead.
+    private func splitPairMenu(for item: FlekHomeItem) -> UIMenu? {
+        guard homeItemName(item) != nil else { return nil }
+        guard let partnerID = item.splitPartnerID,
+              let name = orderedHomeItems.first(where: { $0.id == partnerID }).flatMap(homeItemName) else {
+            return pairWithMenu(for: item)
+        }
+        let unpair = UIAction(
+            title: "lc.flek.splitMenu.unpair".loc,
+            image: UIImage(systemName: "personalhotspot.slash") ?? UIImage(systemName: "xmark")
+        ) { _ in
+            FlekSplitPairStore.shared.forget(item.id)
+        }
+        return UIMenu(title: String(format: "lc.flek.splitMenu.pairedWith %@".loc, name),
+                      options: .displayInline, children: [unpair])
+    }
+
+    /// Pair With: the home screen's other apps and built-in pages, A to Z, each
+    /// with its icon, to choose the one this opens beside from now on. This one
+    /// takes the left, as Open in Split View puts it, and the one chosen the
+    /// right; the divider's menu swaps them. One paired already says with which,
+    /// as choosing it takes it from that pair. Offered wherever two apps can go
+    /// side by side, held wide now or not: the pair is kept for when they can.
+    private func pairWithMenu(for item: FlekHomeItem) -> UIMenu? {
+        guard #available(iOS 16.0, *), MultitaskDockManager.shared.supportsSplit else { return nil }
+        let named = orderedHomeItems.compactMap { other in homeItemName(other).map { (item: other, name: $0) } }
+        let names = Dictionary(named.map { ($0.item.id, $0.name) }, uniquingKeysWith: { first, _ in first })
+        let choices = named
+            .filter { $0.item.id != item.id }
+            .sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+        guard !choices.isEmpty else { return nil }
+        let darkIcons = darkModeIcon
+        // Drawn once the list is opened rather than with every long press: an
+        // icon for each app on the home screen.
+        let list = UIDeferredMenuElement { completion in
+            let store = FlekSplitPairStore.shared
+            completion(choices.map { choice -> UIMenuElement in
+                let icon = LCSpringboardIconCell.smallIcon(for: choice.item, size: 24, darkMode: darkIcons)
+                // The pair choosing it takes it from, if it is in one.
+                let subtitle = store.partner(of: choice.item.id).flatMap { names[$0] }
+                    .map { String(format: "lc.flek.splitMenu.pairedWith %@".loc, $0) }
+                return UIAction(title: choice.name, subtitle: subtitle,
+                                image: icon?.withRenderingMode(.alwaysOriginal)) { _ in
+                    store.pair(item.id, choice.item.id)
+                    UINotificationFeedbackGenerator().notificationOccurred(.success)
+                }
+            })
+        }
+        let menu = UIMenu(title: "lc.flek.splitMenu.pairWith".loc, image: UIImage(systemName: "link"),
+                          children: [list])
+        menu.subtitle = "lc.flek.splitMenu.pairDetail".loc
+        return menu
+    }
+
+    /// The name under an app's or built-in page's icon; nil for anything else
+    /// on the home screen, which can't be paired or opened beside another.
+    private func homeItemName(_ item: FlekHomeItem) -> String? {
+        switch item {
+        case .defaultApp(let kind): return kind.title
+        case .installed(let app): return app.appInfo.displayName() ?? ""
+        default: return nil
+        }
     }
 
     @available(iOS 16.0, *)
@@ -2681,6 +2751,9 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
             // app's launch mode and never shows as new.
             FlekLaunchModeStore.shared.forget(app)
             FlekLaunchTracker.shared.forget(app)
+            // Its pair too: the app it opened beside would go on showing the
+            // link, and offering to unpair from an app that is gone.
+            FlekSplitPairStore.shared.forget(FlekHomeItem.installedID(for: app.appInfo))
 
             // The app's slot in the home order is deliberately left alone here.
             // `rebuildOrderedHomeItems` is what takes an app off the grid: an id

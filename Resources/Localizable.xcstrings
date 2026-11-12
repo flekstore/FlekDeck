@@ -20119,7 +20119,7 @@
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "The dot is green when Split View is ready and red when it isn’t. Tap it to see this again."
+            "value" : "The dot is green when Split View is ready and red when it isn’t."
           }
         }
       }
@@ -20240,7 +20240,7 @@
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Tap the line to pair them, so opening one opens both."
+            "value" : "Tap the line to swap sides or pair the apps, so opening one opens both."
           }
         }
       }
@@ -20329,6 +20329,105 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Split View"
+          }
+        }
+      }
+    },
+    "lc.flek.splitMenu.closeLeft" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Close Left App"
+          }
+        }
+      }
+    },
+    "lc.flek.splitMenu.closeRight" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Close Right App"
+          }
+        }
+      }
+    },
+    "lc.flek.splitMenu.pair" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Pair Apps"
+          }
+        }
+      }
+    },
+    "lc.flek.splitMenu.pairDetail" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Opening one opens both"
+          }
+        }
+      }
+    },
+    "lc.flek.splitMenu.pairedWith %@" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Paired with %@"
+          }
+        }
+      }
+    },
+    "lc.flek.splitMenu.pairWith" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Pair With"
+          }
+        }
+      }
+    },
+    "lc.flek.splitMenu.swap" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Swap Sides"
+          }
+        }
+      }
+    },
+    "lc.flek.splitMenu.unpair" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Unpair Apps"
+          }
+        }
+      }
+    },
+    "lc.flek.splitMenu.unpairDetail" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Each opens on its own"
           }
         }
       }
