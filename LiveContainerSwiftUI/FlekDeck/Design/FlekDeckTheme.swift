@@ -238,10 +238,13 @@ extension View {
     }
 }
 
-/// Keeps the pages under it to a column of readable width on an iPhone Duo opened
-/// out: the inner display is a tablet's width, and a page laid out for a phone
-/// otherwise stretches its rows and tiles across all of it. Folded, and on every
-/// other device, the pages keep the system's own margins.
+/// Keeps the pages under it to a column of readable width on an iPad and on an
+/// iPhone Duo opened out: their displays are a tablet's width, and a page laid
+/// out for a phone otherwise stretches its rows and tiles across all of it, an
+/// iPad held sideways most of all. The column is centred, as iPadOS centres the
+/// content of a page too wide for it. Narrower than the column (FlekDeck beside
+/// another app, a folded Duo) and on an iPhone, the pages keep the system's own
+/// margins.
 ///
 /// Through the scroll views' content margins rather than a narrower frame, so a
 /// page's background, its navigation bar and the scrolling itself still span the
@@ -257,7 +260,8 @@ struct FlekReadableColumn: ViewModifier {
 
     func body(content: Content) -> some View {
         let spare = available - Self.width
-        let margin: CGFloat? = FlekDeviceModel.isDuo && spare > 0 ? spare / 2 : nil
+        let wide = FlekDeviceModel.isDuo || UIDevice.current.userInterfaceIdiom == .pad
+        let margin: CGFloat? = wide && spare > 0 ? spare / 2 : nil
         if #available(iOS 17.0, *) {
             content
                 .contentMargins(.horizontal, margin, for: .scrollContent)
