@@ -1580,7 +1580,7 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
     // MARK: - UIKit Context Menu (for UIKit springboard)
 
     /// An icon's menu, with "Open in Split View" added where two apps can be put
-    /// side by side: on an iPhone Duo opened out.
+    /// side by side: on an iPad or an iPhone Duo opened out, held wide.
     func homeUIMenu(for item: FlekHomeItem) -> UIMenu? {
         let menu = homeUIMenuItems(for: item)
         guard #available(iOS 16.0, *), let split = openInSplitViewAction(for: item) else { return menu }

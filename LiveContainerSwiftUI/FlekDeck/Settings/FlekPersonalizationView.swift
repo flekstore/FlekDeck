@@ -31,6 +31,7 @@ struct FlekPersonalizationView: View {
     @AppStorage("darkModeIcon", store: LCUtils.appGroupUserDefault) private var darkModeIcon = false
     @AppStorage("LCFrameShortcutIcons", store: LCUtils.appGroupUserDefault) private var frameShortIcon = false
     @AppStorage(FlekDeckKeys.glassStyle, store: LCUtils.appGroupUserDefault) private var glassStyle: FlekGlassStyle = .liquid
+    @AppStorage(FlekDeckKeys.splitLightShown, store: LCUtils.appGroupUserDefault) private var showsSplitLight = true
 
     @State private var showCollection = false
     @State private var showPhotoPicker = false
@@ -123,6 +124,23 @@ struct FlekPersonalizationView: View {
                         .background(card)
 
                         Text("lc.flek.glass.footer".loc)
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                            .padding(.horizontal, 16)
+                    }
+                }
+
+                // MARK: Split View
+                // Only an iPad has the dot: whether two apps can go side by side
+                // there depends on how it is held and how wide FlekDeck is. Hidden
+                // from its own help, it comes back here.
+                if UIDevice.current.userInterfaceIdiom == .pad {
+                    VStack(alignment: .leading, spacing: 10) {
+                        sectionHeader("lc.flek.splitHelp.section".loc)
+                        Toggle("lc.flek.splitHelp.toggle".loc, isOn: $showsSplitLight)
+                            .padding(.horizontal, 16).padding(.vertical, 12)
+                            .background(card)
+                        Text("lc.flek.splitHelp.settingFooter".loc)
                             .font(.footnote)
                             .foregroundStyle(.secondary)
                             .padding(.horizontal, 16)

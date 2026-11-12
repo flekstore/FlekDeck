@@ -19,6 +19,7 @@ enum FlekDeckKeys {
     static let homeScreenPageSizes = "FlekHomeScreenPageSizes" // per-page item counts for custom page layouts
     static let cardStyleGlass = "FlekCardStyleGlass" // true = liquid glass, false = thin material
     static let glassStyle = "FlekGlassStyle"         // "liquid" | "frosted"
+    static let splitLightShown = "FlekSplitLightShown" // iPad: the Split View dot in the home screen's running-apps pill
 }
 
 /// Home screen layout chosen on the Personalization page.

@@ -20091,6 +20091,248 @@
         }
       }
     },
+    "lc.flek.splitHelp.hint" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Shows how to use Split View."
+          }
+        }
+      }
+    },
+    "lc.flek.splitHelp.intro" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Use two apps side by side"
+          }
+        }
+      }
+    },
+    "lc.flek.splitHelp.legend" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "The dot is green when Split View is ready and red when it isn’t. Tap it to see this again."
+          }
+        }
+      }
+    },
+    "lc.flek.splitHelp.more1" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "In an app, hold the middle button on its bar and drag the app to a side."
+          }
+        }
+      }
+    },
+    "lc.flek.splitHelp.more2" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "On the Home Screen, hold an app’s icon and choose Open in Split View."
+          }
+        }
+      }
+    },
+    "lc.flek.splitHelp.moreWays" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "More ways to start"
+          }
+        }
+      }
+    },
+    "lc.flek.splitHelp.narrow" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Make FlekDeck’s window wider to use it."
+          }
+        }
+      }
+    },
+    "lc.flek.splitHelp.notReady" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Split View isn’t available right now"
+          }
+        }
+      }
+    },
+    "lc.flek.splitHelp.ready" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Split View is ready"
+          }
+        }
+      }
+    },
+    "lc.flek.splitHelp.section" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Split View"
+          }
+        }
+      }
+    },
+    "lc.flek.splitHelp.settingFooter" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "A dot beside the app switcher on the Home Screen shows whether Split View is ready. Tap it to see how to use it."
+          }
+        }
+      }
+    },
+    "lc.flek.splitHelp.side1" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Drag the line between them to make one bigger."
+          }
+        }
+      }
+    },
+    "lc.flek.splitHelp.side2" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Drag the line to the edge to close an app."
+          }
+        }
+      }
+    },
+    "lc.flek.splitHelp.side3" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Tap the line to pair them, so opening one opens both."
+          }
+        }
+      }
+    },
+    "lc.flek.splitHelp.sideBySide" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "With two apps side by side"
+          }
+        }
+      }
+    },
+    "lc.flek.splitHelp.step1" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Hold an app’s icon in this bar."
+          }
+        }
+      }
+    },
+    "lc.flek.splitHelp.step2" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Drag it to the left or right side of the screen and let go."
+          }
+        }
+      }
+    },
+    "lc.flek.splitHelp.step3" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Pick the second app for the other side."
+          }
+        }
+      }
+    },
+    "lc.flek.splitHelp.toggle" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Show Split View Dot"
+          }
+        }
+      }
+    },
+    "lc.flek.splitHelp.toggleFooter" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "You can turn it back on in Settings › Personalization."
+          }
+        }
+      }
+    },
+    "lc.flek.splitHelp.upright" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Turn your iPad sideways to use it."
+          }
+        }
+      }
+    },
+    "lc.flek.splitLight" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Split View"
+          }
+        }
+      }
+    },
     "lc.flek.switcherHaptics" : {
       "extractionState" : "manual",
       "localizations" : {

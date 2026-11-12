@@ -212,6 +212,8 @@ class AppInfoProvider {
             if isHomeState { floatWindowLeavingStage(frontmostAppUUID) }
             updatePiPArming()
             quickSwitchHomeStateChanged()
+            // The light's bubble is about the home screen's pill.
+            if !isHomeState { hideSplitHelp() }
             // Back on stage: what was decided while home is decided again.
             if !isHomeState, oldValue { refreshSideColumnRoom() }
             // The next home state's dock may hold other apps, in other places.
@@ -338,6 +340,26 @@ class AppInfoProvider {
     private var dockLiftBackdrop: UIVisualEffectView?
     /// The drop targets at each side while an app is lifted.
     var splitShelves: [SplitSide: SplitShelfView] = [:]
+    /// Where the divider rests between two apps on an iPad, as the left side's
+    /// share of the width, by the two (see `splitFoldFraction`). Kept from one
+    /// launch to the next, as iPadOS keeps its own pairs' sizes.
+    var splitFractions: [String: CGFloat] = (LCUtils.appGroupUserDefault
+        .dictionary(forKey: MultitaskDockManager.splitFractionsKey) as? [String: Double])?
+        .mapValues { CGFloat($0) } ?? [:] {
+        didSet {
+            LCUtils.appGroupUserDefault.set(splitFractions.mapValues { Double($0) },
+                                            forKey: Self.splitFractionsKey)
+        }
+    }
+    /// What veils each side while the divider is dragged on an iPad (see
+    /// `resizeSplit(with:)`).
+    var splitPaneCovers: [SplitSide: SplitPaneCoverView] = [:]
+    /// The light in the home screen's running-apps pill on an iPad: green where an
+    /// app held there can be dragged out beside another, red where it cannot now,
+    /// and why (see `refreshSplitLight`).
+    @Published private(set) var splitLight: SplitLight?
+    /// How Split View works, in a popover over the light while it is tapped.
+    weak var splitHelpController: UIViewController?
     /// The handle under each app: its own home indicator.
     var splitHandles: [SplitSide: SplitHandleView] = [:]
     /// The app button's tap that ends a lift is not a press of the button.
@@ -2065,6 +2087,7 @@ class AppInfoProvider {
     /// undefined).
     private func updateDockFrame(animated: Bool = true) {
         guard let hostingController = hostingController, isSwitcherBarVisible else { return }
+        refreshSplitLight()
 
         // Pick up the current design as the bar (re)lays out — never mid-toggle.
         captureBarDesign()
@@ -2748,6 +2771,7 @@ class AppInfoProvider {
     ///   being chosen, as the bar's own button chooses it, rather than the side
     ///   column stepping aside for an app's side bar, which chooses nothing.
     private func hideSwitcherBar(choosingFloatingButton: Bool) {
+        hideSplitHelp()
         guard let hostingController = hostingController, let keyWindow = self.keyWindow else { return }
         
         DispatchQueue.main.async {
@@ -4510,6 +4534,7 @@ class AppInfoProvider {
     /// landscape window. Waiting for the window to actually turn removes both cases.
     func showAppSwitcher() {
         guard let keyWindow = self.keyWindow else { return }
+        hideSplitHelp()
 
         // Snapshot the running apps before any rotation, so a card shows the app as
         // it actually looked. Capturing afterwards would catch it mid-turn or already
@@ -4536,11 +4561,14 @@ class AppInfoProvider {
 
     /// Whether the display FlekDeck is on keeps its shape whatever is asked of it:
     /// the iPhone Duo's inner one, opened out, where iOS shows every scene in all
-    /// orientations and no lock holds. The portrait the switcher and the way home
-    /// ask for is never granted there, so whatever waits for it waits in vain;
-    /// both go ahead as they are. The cover display turns as any iPhone's does.
+    /// orientations and no lock holds, and an iPad from iPadOS 26 on, where apps
+    /// are windows that turn with the iPad and cannot hold it to one way up. The
+    /// portrait the switcher and the way home ask for is never granted there, so
+    /// whatever waits for it waits in vain; both go ahead as they are. The Duo's
+    /// cover display turns as any iPhone's does.
     private var displayNeverTurns: Bool {
         guard let screen = keyWindow?.windowScene?.screen else { return false }
+        if #available(iOS 26.0, *), UIDevice.current.userInterfaceIdiom == .pad { return true }
         return FlekDeviceModel.duoDisplay(of: screen) == .inner
     }
 
@@ -8035,6 +8063,10 @@ private struct MultitaskHomeIcon: View {
 @available(iOS 16.0, *)
 struct MultitaskHomeDockPill: View {
     @ObservedObject private var dockManager = MultitaskDockManager.shared
+    /// The split light, unless it was switched off (in its help, or in
+    /// Personalization).
+    @AppStorage(FlekDeckKeys.splitLightShown, store: LCUtils.appGroupUserDefault)
+    private var showsSplitLight = true
     let darkModeIcon: Bool
     /// Which way the pill runs: along the bottom bar, or down the side column
     /// beside an iPhone Duo's vertical status bar.
@@ -8089,10 +8121,21 @@ struct MultitaskHomeDockPill: View {
             HStack(spacing: 8) {
                 MultitaskHomeIcons(darkModeIcon: darkModeIcon, iconSize: iconSize)
                 switcherButton
+                if showsSplitLight, let light = dockManager.splitLight {
+                    // Tucked in beside the switcher's glyph, into the room its
+                    // square leaves on the right, rather than a whole gap away.
+                    HomeSplitLight(light: light, height: thickness)
+                        .padding(.leading, -20)
+                        .transition(.opacity)
+                }
             }
             .padding(.leading, 16)
             .padding(.trailing, 10)
             .frame(height: thickness)
+            .animation(.easeInOut(duration: 0.25), value: dockManager.splitLight)
+            // As each home state begins: the light is kept up as the window turns
+            // or is resized, and here as the pill comes up.
+            .onAppear { dockManager.refreshSplitLight() }
         } else {
             VStack(spacing: 8) {
                 MultitaskHomeIcons(darkModeIcon: darkModeIcon, iconSize: iconSize)
@@ -8122,6 +8165,47 @@ struct MultitaskHomeDockPill: View {
                 .frame(width: thickness, height: thickness)
         }
         .buttonStyle(.plain)
+    }
+}
+
+/// The split light in the home screen's running-apps pill, right of the
+/// switcher's glyph: green where an app held in the pill can be dragged out
+/// into Split View, red where it cannot now. Tapped, it says what it means and
+/// how Split View works (`toggleSplitHelp`). The dot is small; what takes the tap is a
+/// strip the pill's height, beside the glyph and over nothing else.
+@available(iOS 16.0, *)
+private struct HomeSplitLight: View {
+    @ObservedObject private var dockManager = MultitaskDockManager.shared
+    let light: MultitaskDockManager.SplitLight
+    let height: CGFloat
+    @State private var frameInWindow: CGRect = .zero
+
+    private static let diameter: CGFloat = 7
+    private static let width: CGFloat = 20
+
+    var body: some View {
+        let color = light.isAvailable ? Color(uiColor: .systemGreen) : Color(uiColor: .systemRed)
+        Button {
+            dockManager.toggleSplitHelp(at: frameInWindow)
+        } label: {
+            Circle()
+                .fill(color)
+                .frame(width: Self.diameter, height: Self.diameter)
+                .shadow(color: color.opacity(0.6), radius: 2.5)
+                .frame(width: Self.width, height: height)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .background(
+            GeometryReader { geometry in
+                Color.clear
+                    .onAppear { frameInWindow = geometry.frame(in: .global) }
+                    .onChange(of: geometry.frame(in: .global)) { frameInWindow = $0 }
+            }
+        )
+        .accessibilityLabel("lc.flek.splitLight".loc)
+        .accessibilityValue(light.title)
+        .accessibilityHint("lc.flek.splitHelp.hint".loc)
     }
 }
 
@@ -9681,10 +9765,12 @@ extension MultitaskDockManager {
     /// How far an app shrinks as it is lifted.
     static let splitLiftScale: CGFloat = 0.5
     private static let splitPairsKey = "FlekSplitPairs"
+    static let splitFractionsKey = "FlekSplitFractions"
     private static let splitIconCache = NSCache<NSString, UIImage>()
 
     /// Whether the display FlekDeck is on has room for two apps side by side:
-    /// the iPhone Duo's inner one.
+    /// an iPad's, or the iPhone Duo's inner one. Whether they go side by side now
+    /// is `canSplitNow`: the window held wide, and wide enough.
     var isSplitDisplay: Bool {
         guard let screen = (windowHostingView.window ?? keyWindow)?.windowScene?.screen else {
             return false
@@ -9695,6 +9781,7 @@ extension MultitaskDockManager {
         // split on any display wide enough.
         if UserDefaults.standard.bool(forKey: "FlekSplitOnAnyDisplay") { return true }
         #endif
+        if UIDevice.current.userInterfaceIdiom == .pad { return true }
         return FlekDeviceModel.duoDisplay(of: screen) == .inner
     }
 
@@ -9702,8 +9789,10 @@ extension MultitaskDockManager {
         windowHostingView.window?.bounds.size ?? windowHostingView.bounds.size
     }
 
-    /// Whether two apps can be put side by side now: apps open in windows, on the
-    /// inner display, held open, wider than it is tall.
+    /// Whether two apps can be put side by side now: apps open in windows, on an
+    /// iPad or the Duo's inner display, held wide, and wide enough. An iPad turned
+    /// upright, or FlekDeck's window made narrow beside other apps, is a Duo
+    /// folded: one app at a time, the two together again once it is wide.
     var canSplitNow: Bool {
         guard isDockEnabled(), DataManager.shared.model.multiLCStatus != 2, isSplitDisplay else {
             return false
@@ -9716,6 +9805,122 @@ extension MultitaskDockManager {
     /// switcher has turned the display, each has the whole screen until it is
     /// wide again.
     var isSplitShowing: Bool { splitPair != nil && canSplitNow }
+
+    /// What keeps two apps from going side by side now, on a display that can
+    /// hold them: held upright, or FlekDeck's window made narrow beside other
+    /// apps.
+    enum SplitUnavailability { case upright, narrow }
+
+    /// Why two apps cannot go side by side now, for the home screen's menu to say
+    /// so. Nil where they can, and where the question does not arise: a display
+    /// that never holds two, or apps not opened in windows at all.
+    var splitUnavailability: SplitUnavailability? {
+        guard isSplitDisplay, isDockEnabled(), DataManager.shared.model.multiLCStatus != 2,
+              !canSplitNow else { return nil }
+        let size = splitHostSize
+        return size.width > size.height ? .narrow : .upright
+    }
+
+    enum SplitLight: Equatable {
+        case available
+        case unavailable(SplitUnavailability)
+
+        var isAvailable: Bool { self == .available }
+
+        /// Where things stand, as the help and VoiceOver say it.
+        var title: String {
+            isAvailable ? "lc.flek.splitHelp.ready".loc : "lc.flek.splitHelp.notReady".loc
+        }
+
+        /// What would make it ready, where it is not.
+        var reason: String? {
+            switch self {
+            case .available: return nil
+            case .unavailable(.upright): return "lc.flek.splitHelp.upright".loc
+            case .unavailable(.narrow): return "lc.flek.splitHelp.narrow".loc
+            }
+        }
+    }
+
+    /// Sets the home pill's light from where things stand: on an iPad, green where
+    /// two apps can go side by side now, red where the iPad is upright or
+    /// FlekDeck's window too narrow beside other apps; none elsewhere, or with
+    /// apps not in windows. Whether holding an app there and dragging does
+    /// anything is not something the pill otherwise shows. Published a turn
+    /// later: this is asked during layout.
+    func refreshSplitLight() {
+        let light: SplitLight?
+        if UIDevice.current.userInterfaceIdiom != .pad {
+            light = nil
+        } else if canSplitNow {
+            light = .available
+        } else if let reason = splitUnavailability {
+            light = .unavailable(reason)
+        } else {
+            light = nil
+        }
+        guard light != splitLight else { return }
+        DispatchQueue.main.async {
+            guard self.splitLight != light else { return }
+            self.splitLight = light
+            // What it said is no longer so.
+            self.hideSplitHelp()
+        }
+    }
+
+    /// The light tapped: how Split View works, in a popover pointing at it, with
+    /// where things stand now and the switch that hides the light; or the
+    /// popover put away if it is up already. `lightFrame` is the light's frame in
+    /// the home screen's window.
+    func toggleSplitHelp(at lightFrame: CGRect) {
+        if splitHelpController != nil {
+            hideSplitHelp()
+            return
+        }
+        guard var presenter = keyWindow?.rootViewController else { return }
+        while let presented = presenter.presentedViewController { presenter = presented }
+        guard let stage = presenter.view else { return }
+        let anchor = stage.convert(lightFrame, from: nil)
+        // The room the popover has, above the light or below it, less its arrow
+        // and the margin it keeps from the screen's edges.
+        let safe = stage.safeAreaInsets
+        let roomHeight = max(anchor.minY - safe.top, stage.bounds.height - safe.bottom - anchor.maxY) - 40
+        let roomWidth = stage.bounds.width - safe.left - safe.right - 32
+        func natural(_ layout: SplitHelpCard.Layout) -> CGSize {
+            UIHostingController(rootView: SplitHelpCard(layout: layout, scrolls: false))
+                .sizeThatFits(in: CGSize(width: layout.width, height: .greatestFiniteMagnitude))
+        }
+        // One column where it fits; two where it would not and there is the
+        // width for them; scrolled where neither fits.
+        var layout = SplitHelpCard.Layout.column
+        var size = natural(.column)
+        if size.height > roomHeight, roomWidth >= SplitHelpCard.Layout.columns.width {
+            let wide = natural(.columns)
+            if wide.height < size.height {
+                layout = .columns
+                size = wide
+            }
+        }
+        let help = UIHostingController(rootView: SplitHelpCard(layout: layout, scrolls: true))
+        // The popover's own material behind it, not a sheet of solid colour.
+        help.view.backgroundColor = .clear
+        help.modalPresentationStyle = .popover
+        help.preferredContentSize = CGSize(width: size.width, height: min(size.height, max(roomHeight, 200)))
+        if let popover = help.popoverPresentationController {
+            popover.sourceView = stage
+            popover.sourceRect = anchor
+            popover.permittedArrowDirections = [.down, .up]
+            popover.delegate = self
+        }
+        splitHelpController = help
+        presenter.present(help, animated: true)
+    }
+
+    func hideSplitHelp() {
+        guard let help = splitHelpController else { return }
+        splitHelpController = nil
+        help.dismiss(animated: true)
+    }
 
     /// The page `uuid`'s window has, in the window host's coordinates, or null
     /// while it has the whole screen. Asked by a guest window each time it is
@@ -9734,11 +9939,47 @@ extension MultitaskDockManager {
         return splitPair ?? splitSuspended
     }
 
+    /// Whether the divider can rest elsewhere than in the middle: on an iPad, as
+    /// in iPadOS's own Split View. The Duo's two are always half and half, the
+    /// fold between its panels.
+    var splitIsResizable: Bool { UIDevice.current.userInterfaceIdiom == .pad }
+
+    /// The narrowest a side may be made on an iPad: room for an app laid out
+    /// for a phone.
+    static let splitMinimumPaneWidth: CGFloat = 320
+
+    private static func splitFractionKey(_ a: String, _ b: String) -> String {
+        a < b ? "\(a)|\(b)" : "\(b)|\(a)"
+    }
+
+    /// Where the divider rests on an iPad, as shares of `width`: a third, half
+    /// and two thirds, where both sides keep room for an app laid out for a
+    /// phone. Half alone where a third would be narrower than that.
+    private func splitSnapFractions(width: CGFloat) -> [CGFloat] {
+        [1.0 / 3, 0.5, 2.0 / 3].filter { fraction in
+            fraction == 0.5
+                || width * min(fraction, 1 - fraction) - Self.splitGap / 2 >= Self.splitMinimumPaneWidth
+        }
+    }
+
+    /// The left side's share of the width for the two framed side by side: where
+    /// the divider was left for them, kept by the two whichever side each is on,
+    /// so a swap keeps the sides' sizes. Half for two never resized, for an app
+    /// beside the apps to choose from, on a window too narrow for that share, and
+    /// always on the Duo.
+    private var splitFoldFraction: CGFloat {
+        guard splitIsResizable, let pair = framedSplitPair, let left = pair.left, let right = pair.right,
+              let fraction = splitFractions[Self.splitFractionKey(left, right)],
+              splitSnapFractions(width: splitHostSize.width).contains(fraction) else { return 0.5 }
+        return fraction
+    }
+
     private func splitPaneFrame(_ side: SplitSide) -> CGRect {
         let bounds = CGRect(origin: .zero, size: splitHostSize)
         let area = bounds.inset(by: barReservedInsets)
-        // The fold runs down the middle of the display.
-        let fold = bounds.midX
+        // The fold runs down the middle of the display, or on an iPad wherever
+        // the divider was left for these two.
+        let fold = bounds.width * splitFoldFraction
         let half = Self.splitGap / 2
         switch side {
         case .left:
@@ -10604,6 +10845,7 @@ extension MultitaskDockManager {
     func endSplit() {
         splitLaunch = nil
         splitPickerModel.launchingID = nil
+        hideSplitPaneCovers(after: 0)
         guard let pair = splitPair else { return }
         splitPair = nil
         syncSplitChrome()
@@ -10804,6 +11046,7 @@ extension MultitaskDockManager {
         guard let host = windowHostingView.superview else { return }
         var views: [UIView] = []
         if let picker = splitPicker?.view { views.append(picker) }
+        for side in SplitSide.allCases { if let cover = splitPaneCovers[side] { views.append(cover) } }
         for side in SplitSide.allCases { if let shelf = splitShelves[side] { views.append(shelf) } }
         if let curtain = splitCurtain { views.append(curtain) }
         for side in SplitSide.allCases { if let handle = splitHandles[side] { views.append(handle) } }
@@ -10941,7 +11184,12 @@ extension MultitaskDockManager {
     /// otherwise the divider goes back to the fold.
     @objc private func splitDividerPanned(_ pan: UIPanGestureRecognizer) {
         guard isSplitShowing, let divider = splitDivider, let host = divider.superview else {
+            hideSplitPaneCovers(after: 0)
             settleSplitDivider()
+            return
+        }
+        if splitIsResizable, let pair = splitPair, pair.left != nil, pair.right != nil {
+            resizeSplit(with: pan)
             return
         }
         let left = splitPaneFrame(.left)
@@ -10979,6 +11227,166 @@ extension MultitaskDockManager {
         }
     }
 
+    /// The divider dragged on an iPad, with an app on each side: it follows the
+    /// finger, and both sides are veiled as they would be, each its app's icon on
+    /// a blur, as iPadOS veils apps being resized. Let go, it rests on the nearest
+    /// of a third, half or two thirds, the finger's speed carrying it on a little,
+    /// and both apps are laid out for their new sides under the veils. Carried
+    /// almost to an edge, the side it crossed is closed, as on the Duo.
+    private func resizeSplit(with pan: UIPanGestureRecognizer) {
+        guard let divider = splitDivider, let host = divider.superview, let pair = splitPair,
+              let leftApp = pair.left, let rightApp = pair.right else {
+            hideSplitPaneCovers(after: 0)
+            settleSplitDivider()
+            return
+        }
+        let bounds = CGRect(origin: .zero, size: splitHostSize)
+        let area = bounds.inset(by: barReservedInsets)
+        let fold = bounds.width * splitFoldFraction
+        let x = min(max(fold + pan.translation(in: host).x, area.minX), area.maxX)
+        let half = Self.splitGap / 2
+        let leftWidth = x - half - area.minX
+        let rightWidth = area.maxX - x - half
+        let shrinking: SplitSide = leftWidth < rightWidth ? .left : .right
+        let shrinkingWidth = max(min(leftWidth, rightWidth), 0)
+        // Narrower than this, a side is on its way out.
+        let closing = Self.splitMinimumPaneWidth * 0.7
+        switch pan.state {
+        case .began, .changed:
+            divider.transform = CGAffineTransform(translationX: x - fold, y: 0)
+            showSplitPaneCovers(left: leftApp, right: rightApp)
+            layoutSplitPaneCovers(fold: x, area: area)
+            let progress = max(0, (closing - shrinkingWidth) / closing)
+            if progress > 0 {
+                let curtain: UIView
+                if let existing = splitCurtain {
+                    curtain = existing
+                } else {
+                    curtain = UIView()
+                    curtain.backgroundColor = .black
+                    curtain.isUserInteractionEnabled = false
+                    host.addSubview(curtain)
+                    splitCurtain = curtain
+                    arrangeSplitChrome()
+                }
+                let frame = shrinking == .left
+                    ? CGRect(x: area.minX, y: area.minY, width: shrinkingWidth, height: area.height)
+                    : CGRect(x: x + half, y: area.minY, width: shrinkingWidth, height: area.height)
+                curtain.frame = windowHostingView.convert(frame, to: host)
+                curtain.alpha = min(progress * 1.4, 0.85)
+            } else {
+                splitCurtain?.alpha = 0
+            }
+        case .ended:
+            let velocity = pan.velocity(in: host).x
+            let towards = shrinking == .left ? -velocity : velocity
+            if shrinkingWidth < closing
+                || (shrinkingWidth < Self.splitMinimumPaneWidth && towards > 800) {
+                // The other app grows over the screen under its veil, which goes
+                // once it has.
+                hideSplitPaneCovers(after: 0.5)
+                closeSplitSide(shrinking)
+                return
+            }
+            let projected = min(max(x + velocity * 0.12, area.minX), area.maxX)
+            let target = splitSnapFractions(width: bounds.width).min {
+                abs(bounds.width * $0 - projected) < abs(bounds.width * $1 - projected)
+            } ?? 0.5
+            settleSplitFold(at: target, for: pair)
+        default:
+            hideSplitPaneCovers(after: 0)
+            settleSplitDivider()
+        }
+    }
+
+    /// The divider let go on an iPad, where it is to rest: the two laid out for
+    /// their new sides, the divider carried from the finger to its place, and the
+    /// veils over them until the apps have had time to draw at their new sizes.
+    private func settleSplitFold(at fraction: CGFloat, for pair: SplitPair) {
+        guard let left = pair.left, let right = pair.right else { return }
+        if abs(fraction - splitFoldFraction) > 0.001 {
+            UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        }
+        splitFractions[Self.splitFractionKey(left, right)] = fraction
+        let bounds = CGRect(origin: .zero, size: splitHostSize)
+        let area = bounds.inset(by: barReservedInsets)
+        let fold = bounds.width * splitFoldFraction
+        UIView.animate(withDuration: 0.35, delay: 0, usingSpringWithDamping: 0.9,
+                       initialSpringVelocity: 0,
+                       options: [.allowUserInteraction, .beginFromCurrentState]) {
+            self.layoutSplitPaneCovers(fold: fold, area: area)
+        }
+        // Moved to its place at once, then shown arriving there from where the
+        // finger left it.
+        if let divider = splitDivider {
+            let shownAt = divider.center.x + divider.transform.tx
+            divider.transform = .identity
+            syncSplitChrome()
+            divider.transform = CGAffineTransform(translationX: shownAt - divider.center.x, y: 0)
+            UIView.animate(withDuration: 0.35, delay: 0, usingSpringWithDamping: 0.9,
+                           initialSpringVelocity: 0,
+                           options: [.allowUserInteraction, .beginFromCurrentState]) {
+                divider.transform = .identity
+            }
+        } else {
+            syncSplitChrome()
+        }
+        for uuid in pair.members { relayoutSplitWindow(of: uuid, animated: true) }
+        // A side on its way out, and brought back.
+        let curtain = splitCurtain
+        splitCurtain = nil
+        UIView.animate(withDuration: 0.2, delay: 0, options: [.allowUserInteraction]) {
+            curtain?.alpha = 0
+        } completion: { _ in
+            curtain?.removeFromSuperview()
+        }
+        hideSplitPaneCovers(after: 0.45)
+    }
+
+    /// A veil over each side, up and ready to follow the divider.
+    private func showSplitPaneCovers(left: String, right: String) {
+        guard let host = windowHostingView.superview else { return }
+        var added = false
+        for (side, uuid) in [(SplitSide.left, left), (SplitSide.right, right)] where splitPaneCovers[side] == nil {
+            let icon = apps.first(where: { $0.appUUID == uuid }).flatMap(SwitcherBarContentView.cachedIcon(for:))
+            let cover = SplitPaneCoverView(icon: icon)
+            host.addSubview(cover)
+            splitPaneCovers[side] = cover
+            added = true
+        }
+        guard added else { return }
+        arrangeSplitChrome()
+        UIView.animate(withDuration: 0.2, delay: 0, options: [.allowUserInteraction]) {
+            for cover in self.splitPaneCovers.values { cover.setShown(true) }
+        }
+    }
+
+    /// The veils over the two sides as they would be with the fold at `fold`.
+    private func layoutSplitPaneCovers(fold: CGFloat, area: CGRect) {
+        guard let host = windowHostingView.superview else { return }
+        let half = Self.splitGap / 2
+        let frames: [SplitSide: CGRect] = [
+            .left: CGRect(x: area.minX, y: area.minY, width: max(fold - half - area.minX, 0), height: area.height),
+            .right: CGRect(x: fold + half, y: area.minY, width: max(area.maxX - fold - half, 0), height: area.height),
+        ]
+        for (side, cover) in splitPaneCovers {
+            guard let frame = frames[side] else { continue }
+            cover.frame = windowHostingView.convert(frame, to: host)
+        }
+    }
+
+    /// The veils lifted, `delay` from now, and gone.
+    private func hideSplitPaneCovers(after delay: TimeInterval) {
+        let covers = Array(splitPaneCovers.values)
+        guard !covers.isEmpty else { return }
+        splitPaneCovers = [:]
+        UIView.animate(withDuration: 0.25, delay: delay, options: [.allowUserInteraction]) {
+            for cover in covers { cover.setShown(false) }
+        } completion: { _ in
+            covers.forEach { $0.removeFromSuperview() }
+        }
+    }
+
     private func settleSplitDivider() {
         let curtain = splitCurtain
         splitCurtain = nil
@@ -11004,6 +11412,10 @@ extension MultitaskDockManager {
         if let leaving, let staying,
            let leavingID = splitItemID(of: leaving), let stayingID = splitItemID(of: staying) {
             forgetSplitPair(leavingID, stayingID)
+        }
+        // Parted, and when they are put together again it is half and half.
+        if let leaving, let staying {
+            splitFractions.removeValue(forKey: Self.splitFractionKey(leaving, staying))
         }
         let curtain = splitCurtain
         splitCurtain = nil
@@ -11311,6 +11723,7 @@ extension MultitaskDockManager {
     /// The host re-frames every guest straight after this.
     @objc func windowHostDidResize() {
         if splitLift != nil { splitLiftCancelled() }
+        refreshSplitLight()
         // Two kept are kept in their places where there is room for two, and
         // given the whole screen each where there is not (see `framedSplitPair`).
         // Guests are re-framed by the host; built-in pages are not.
@@ -11665,6 +12078,157 @@ final class SplitDividerView: UIView {
 /// The handle under one of two apps side by side, where its home indicator
 /// would be on a Duo of its own: swiped up, or tapped, that side shows the apps
 /// to choose from.
+/// How Split View works, for someone who has not used it: shown in a popover
+/// when the home screen's split light is tapped. Where things stand first, and
+/// what would make it ready; then how to start, other ways in, what can be done
+/// with two side by side, what the light's colours mean, and the switch that
+/// hides the light (Personalization brings it back).
+@available(iOS 16.0, *)
+struct SplitHelpCard: View {
+    /// One column, the card's natural shape; or two side by side where one
+    /// would be taller than the room above the light: an iPad held sideways
+    /// leaves little height between the status bar and the pill, and plenty
+    /// across.
+    enum Layout {
+        case column, columns
+
+        var width: CGFloat { self == .column ? 340 : 680 }
+    }
+
+    let layout: Layout
+    /// Scrolls where even its layout is taller than the popover can be, rather
+    /// than being cut off at the top and bottom.
+    let scrolls: Bool
+
+    @ObservedObject private var dockManager = MultitaskDockManager.shared
+    @AppStorage(FlekDeckKeys.splitLightShown, store: LCUtils.appGroupUserDefault)
+    private var showsLight = true
+
+    var body: some View {
+        if scrolls {
+            ScrollView(.vertical) { content }
+        } else {
+            content
+        }
+    }
+
+    private var content: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            status
+            switch layout {
+            case .column:
+                howTo
+                moreWays
+                sideBySide
+                legend
+            case .columns:
+                HStack(alignment: .top, spacing: 28) {
+                    VStack(alignment: .leading, spacing: 18) {
+                        howTo
+                        moreWays
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    VStack(alignment: .leading, spacing: 18) {
+                        sideBySide
+                        legend
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            }
+            Divider()
+            VStack(alignment: .leading, spacing: 4) {
+                Toggle("lc.flek.splitHelp.toggle".loc, isOn: $showsLight)
+                Text("lc.flek.splitHelp.toggleFooter".loc)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .padding(20)
+        .frame(width: layout.width, alignment: .leading)
+    }
+
+    /// Where things stand, and what would make it ready.
+    private var status: some View {
+        let light = dockManager.splitLight ?? .available
+        return VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 8) {
+                Circle()
+                    .fill(light.isAvailable ? Color(uiColor: .systemGreen) : Color(uiColor: .systemRed))
+                    .frame(width: 9, height: 9)
+                Text(light.title)
+                    .font(.headline)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            if let reason = light.reason {
+                Text(reason)
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
+    private var howTo: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("lc.flek.splitHelp.intro".loc)
+                .font(.subheadline.weight(.semibold))
+            step(1, "lc.flek.splitHelp.step1".loc)
+            step(2, "lc.flek.splitHelp.step2".loc)
+            step(3, "lc.flek.splitHelp.step3".loc)
+        }
+    }
+
+    private var moreWays: some View {
+        section("lc.flek.splitHelp.moreWays".loc, rows: [
+            ("hand.draw", "lc.flek.splitHelp.more1".loc),
+            ("square.grid.2x2", "lc.flek.splitHelp.more2".loc),
+        ])
+    }
+
+    private var sideBySide: some View {
+        section("lc.flek.splitHelp.sideBySide".loc, rows: [
+            ("arrow.left.and.right", "lc.flek.splitHelp.side1".loc),
+            ("xmark.rectangle", "lc.flek.splitHelp.side2".loc),
+            ("link", "lc.flek.splitHelp.side3".loc),
+        ])
+    }
+
+    private var legend: some View {
+        Text("lc.flek.splitHelp.legend".loc)
+            .font(.footnote)
+            .foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
+    }
+
+    private func step(_ number: Int, _ text: String) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 10) {
+            Image(systemName: "\(number).circle.fill")
+                .foregroundStyle(.tint)
+            Text(text)
+                .font(.subheadline)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private func section(_ title: String, rows: [(symbol: String, text: String)]) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(title)
+                .font(.subheadline.weight(.semibold))
+            ForEach(Array(rows.enumerated()), id: \.offset) { _, row in
+                HStack(alignment: .firstTextBaseline, spacing: 10) {
+                    Image(systemName: row.symbol)
+                        .foregroundStyle(.secondary)
+                        .frame(width: 20)
+                    Text(row.text)
+                        .font(.subheadline)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+        }
+    }
+}
+
 /// A side's drop zone while an app is lifted: dark frosted, outlined and marked,
 /// so it reads over anything under it, the home screen's wallpaper and icons
 /// included. Shown and aimed at through its blur and its marks, never its own
@@ -11729,6 +12293,50 @@ final class SplitShelfView: UIView {
         outline.alpha = !isShown ? 0 : aimed ? 1 : 0.7
         glyph.alpha = !isShown ? 0 : aimed ? 1 : 0.9
         transform = aimed ? CGAffineTransform(scaleX: 1.05, y: 1.05) : .identity
+    }
+}
+
+/// A side veiled while the divider is dragged on an iPad: what is under it
+/// blurred, and its app's icon in the middle, as iPadOS shows an app being
+/// resized. Shown and hidden through its blur and its icon, never its own alpha.
+final class SplitPaneCoverView: UIView {
+    private static let blurEffect = UIBlurEffect(style: .systemThickMaterial)
+    private let blur = UIVisualEffectView(effect: nil)
+    private let iconView = UIImageView()
+
+    init(icon: UIImage?) {
+        super.init(frame: .zero)
+        isUserInteractionEnabled = false
+        clipsToBounds = true
+        layer.cornerRadius = SplitDividerView.cornerRadius
+        layer.cornerCurve = .continuous
+        blur.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        addSubview(blur)
+        iconView.image = icon
+        iconView.contentMode = .scaleAspectFit
+        iconView.layer.cornerRadius = 16
+        iconView.layer.cornerCurve = .continuous
+        iconView.clipsToBounds = true
+        iconView.alpha = 0
+        addSubview(iconView)
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        blur.frame = bounds
+        let side: CGFloat = 72
+        iconView.frame = CGRect(x: bounds.midX - side / 2, y: bounds.midY - side / 2,
+                                width: side, height: side)
+    }
+
+    /// Up or gone, in whatever animation it is called in.
+    func setShown(_ shown: Bool) {
+        blur.effect = shown ? Self.blurEffect : nil
+        iconView.alpha = shown ? 1 : 0
     }
 }
 
@@ -11825,6 +12433,16 @@ final class SplitHandleView: UIView {
         pause?.invalidate()
         lifting = onLiftBegan?(point) ?? false
         if lifting { onLiftMoved?(point) }
+    }
+}
+
+@available(iOS 16.0, *)
+extension MultitaskDockManager: UIPopoverPresentationControllerDelegate {
+    /// The split help stays a popover pointing at its light, also in a window
+    /// narrow enough that iOS would otherwise make it a sheet.
+    public func adaptivePresentationStyle(for controller: UIPresentationController,
+                                          traitCollection: UITraitCollection) -> UIModalPresentationStyle {
+        .none
     }
 }
 
