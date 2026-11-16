@@ -41,6 +41,9 @@ struct LiveContainerSwiftUIApp : SwiftUI.App {
 
         FlekImageMemory.configureCaches()
 
+        // Split View's tips, on an iPad or an iPhone Duo (see `SplitTips`).
+        if #available(iOS 26.0, *) { SplitTips.configure() }
+
         // Before the app list is read. A private app opened in a window is staged
         // into the app group until the window closes, so a FlekDeck killed with
         // windows open leaves copies behind, and builds before the staging folder

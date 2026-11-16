@@ -10,6 +10,9 @@ import SwiftUI
 import UIKit
 import Combine
 import CoreImage
+// iOS 17 and later, and used only from iOS 26 (`SplitTips`), so the linker
+// links it weakly and FlekDeck still opens on older systems.
+import TipKit
 
 extension NSNotification.Name {
     static let multitaskBarVisibilityChanged = NSNotification.Name("MultitaskBarVisibilityChanged")
@@ -192,7 +195,10 @@ class AppInfoProvider {
         didSet { LCRotationLock.hasGuestWindows = apps.contains { !$0.isInternalPage } }
     }
     @Published var isVisible: Bool = false
-    @Published var isSwitcherBarVisible: Bool = true
+    @Published var isSwitcherBarVisible: Bool = true {
+        // The tip on holding its app button goes and comes with it.
+        didSet { syncSplitBarTip() }
+    }
     /// Both drive `updatePiPArming()`: between them they decide which window, if
     /// any, should be ready to float when the user leaves FlekDeck. Observed here
     /// rather than at each assignment because they are written from a dozen
@@ -205,6 +211,7 @@ class AppInfoProvider {
             updatePiPArming()
             // Another app in front may have more of its own side bar, or less.
             if frontmostAppUUID != oldValue { refreshSideColumnRoom() }
+            syncSplitBarTip()
         }
     }
     @Published var isHomeState: Bool = false {
@@ -224,6 +231,7 @@ class AppInfoProvider {
             } else if !oldValue {
                 homeStatesBegun &+= 1
             }
+            syncSplitBarTip()
         }
     }
     /// Where each running app's icon sits in the home dock, in window
@@ -360,6 +368,32 @@ class AppInfoProvider {
     @Published private(set) var splitLight: SplitLight?
     /// How Split View works, in a popover over the light while it is tapped.
     weak var splitHelpController: UIViewController?
+    /// The tip beside the divider while it is up, and what watches whether it
+    /// should be (see `syncSplitDividerTip`).
+    weak var splitDividerTipController: UIViewController?
+    var splitDividerTipTask: Task<Void, Never>?
+    /// The same for the tip on holding the bar's app button (see
+    /// `syncSplitBarTip`), and what it was shown beside: the bar, or the
+    /// floating button.
+    weak var splitBarTipController: UIViewController?
+    var splitBarTipTask: Task<Void, Never>?
+    weak var splitBarTipAnchor: UIView?
+    /// Which of the button's tips is being watched for: on swapping, beside
+    /// another app, or on starting Split View, alone; nil for neither.
+    var splitBarTipIsSwap: Bool?
+    /// The button's two tips, and the divider's, done with: from then on, for
+    /// as long as FlekDeck runs, nothing is watched for or asked of TipKit.
+    var splitBarTipsFinished = false
+    var splitDividerTipFinished = false
+    /// What the swap tip was last told about having no button to point at.
+    var splitSwapTipLacksButton: Bool?
+    /// An empty view over the bar's app button, for its tip to point at (see
+    /// `presentSplitBarTip`).
+    weak var splitBarTipPointer: UIView?
+    /// What the tip that waits for two apps to fit side by side was last told.
+    var splitTipReadiness: Bool?
+    /// Two apps have been side by side since FlekDeck opened, and the tips know.
+    var splitStartTipDone = false
     /// The handle under each app: its own home indicator.
     var splitHandles: [SplitSide: SplitHandleView] = [:]
     /// The app button's tap that ends a lift is not a press of the button.
@@ -374,7 +408,9 @@ class AppInfoProvider {
     /// window has settled. Its name is on the way in by then, moving with the
     /// windows (see `MultitaskQuickSwitch.ButtonSlide`).
     @Published private(set) var quickSwitchLanding: String?
-    @Published var isAppSwitcherOpen: Bool = false
+    @Published var isAppSwitcherOpen: Bool = false {
+        didSet { syncSplitBarTip() }
+    }
     /// Whether the bar's app button reads Close all, as the switcher's chin does in
     /// its place: on as the switcher opens, off as it closes back to an app or the
     /// next time the bar comes up. The bar and the chin both read it, so the one
@@ -8120,11 +8156,15 @@ struct MultitaskHomeDockPill: View {
         if axis == .horizontal {
             HStack(spacing: 8) {
                 MultitaskHomeIcons(darkModeIcon: darkModeIcon, iconSize: iconSize)
+                    // How to start Split View, the first time it can be started.
+                    .modifier(SplitTipAnchor(kind: .start))
                 switcherButton
                 if showsSplitLight, let light = dockManager.splitLight {
                     // Tucked in beside the switcher's glyph, into the room its
                     // square leaves on the right, rather than a whole gap away.
                     HomeSplitLight(light: light, height: thickness)
+                        // What it means, once the tip above is done with.
+                        .modifier(SplitTipAnchor(kind: .dot))
                         .padding(.leading, -20)
                         .transition(.opacity)
                 }
@@ -8139,6 +8179,7 @@ struct MultitaskHomeDockPill: View {
         } else {
             VStack(spacing: 8) {
                 MultitaskHomeIcons(darkModeIcon: darkModeIcon, iconSize: iconSize)
+                    .modifier(SplitTipAnchor(kind: .start, pointsDown: false))
                 switcherButton
             }
             .padding(.top, thickness / 2 - MultitaskHomeIcon.cornerRadius)
@@ -8206,6 +8247,170 @@ private struct HomeSplitLight: View {
         .accessibilityLabel("lc.flek.splitLight".loc)
         .accessibilityValue(light.title)
         .accessibilityHint("lc.flek.splitHelp.hint".loc)
+    }
+}
+
+// MARK: - Split View tips
+
+/// Split View introduced with TipKit, on an iPad or an iPhone Duo from iOS 26:
+/// how to start it, what the dot beside the switcher means, and that the line
+/// between two apps opens a menu. Each shows the first times its place comes
+/// up after this version is installed, and is done with once closed or once
+/// the user has done what it says. TipKit's own popovers, as Apple's apps use.
+@available(iOS 26.0, *)
+enum SplitTips {
+    /// Where two apps can ever go side by side. Elsewhere TipKit is never set
+    /// up, so no tip shows and nothing is stored.
+    static var areOffered: Bool {
+        UIDevice.current.userInterfaceIdiom == .pad || FlekDeviceModel.isDuo
+    }
+
+    /// The home screen's two, one at a time: how to start where two apps can go
+    /// side by side now, then the dot; and on an iPad held upright, where how to
+    /// start has to wait, the dot first, whose red is what that iPad shows.
+    static let home = TipGroup(.firstAvailable) {
+        SplitStartTip()
+        SplitDotTip()
+    }
+
+    /// Once, as FlekDeck starts. TipKit keeps which tips have been seen in the
+    /// app's own container, so each shows once per install, updates included.
+    /// In a Debug build only, `-FlekResetTips YES` among the launch arguments
+    /// (in Xcode's scheme) shows every tip again, for testing; a Release build,
+    /// the one exported for users, has no way to.
+    static func configure() {
+        guard areOffered else { return }
+        #if DEBUG
+        if UserDefaults.standard.bool(forKey: "FlekResetTips") {
+            try? Tips.resetDatastore()
+        }
+        #endif
+        try? Tips.configure([.displayFrequency(.immediate)])
+    }
+}
+
+/// How to start Split View, pointing at the running apps in the home screen's
+/// bar. Waits until two apps can go side by side there and then.
+@available(iOS 26.0, *)
+struct SplitStartTip: Tip {
+    /// Set by the dock manager (`noteSplitTipReadiness`).
+    @Parameter static var canSplit: Bool = false
+
+    var title: Text { Text("lc.flek.tip.splitStart.title".loc) }
+    var message: Text? { Text("lc.flek.tip.splitStart.message".loc) }
+    var image: Image? { Image(systemName: "rectangle.split.2x1") }
+    var rules: [Rule] { #Rule(Self.$canSplit) { $0 } }
+    /// Shown once at most, whether or not it was closed.
+    var options: [any TipOption] { MaxDisplayCount(1) }
+}
+
+/// What the dot beside the switcher means, on an iPad: after the tip above, or
+/// first while the iPad is upright and the dot is red.
+@available(iOS 26.0, *)
+struct SplitDotTip: Tip {
+    var title: Text { Text("lc.flek.tip.splitDot.title".loc) }
+    var message: Text? { Text("lc.flek.tip.splitDot.message".loc) }
+    var image: Image? { Image(systemName: "circle.fill") }
+    /// Shown once at most, whether or not it was closed.
+    var options: [any TipOption] { MaxDisplayCount(1) }
+}
+
+/// That tapping the line between two apps side by side opens a menu: beside
+/// the line, the first times the two are side by side.
+@available(iOS 26.0, *)
+struct SplitDividerTip: Tip {
+    var title: Text { Text("lc.flek.tip.splitDivider.title".loc) }
+    var message: Text? { Text("lc.flek.tip.splitDivider.message".loc) }
+    var image: Image? { Image(systemName: "hand.tap") }
+    /// After the tip on swapping with the bar's button, which comes first;
+    /// first itself where that tip has no button to point at.
+    var rules: [Rule] {
+        // Without a "not": TipKit's rule macro can't expand one on an input.
+        #Rule(SplitSwapTip.$isDone, SplitSwapTip.$lacksButton) { isDone, lacksButton in
+            isDone || lacksButton
+        }
+    }
+    /// Shown once at most, whether or not it was closed.
+    var options: [any TipOption] { MaxDisplayCount(1) }
+}
+
+/// What the bar's app button does with two apps side by side: it shows the one
+/// in use, and held, that app can be dragged to the other side to swap them.
+/// Beside the button, before the divider's tip, once there is an app on each
+/// side.
+@available(iOS 26.0, *)
+struct SplitSwapTip: Tip {
+    /// Done with: closed, done, or shown its one time. The divider's tip waits
+    /// for it (set by `noteSplitSwapTipDone`).
+    @Parameter static var isDone: Bool = false
+    /// Beside another app, no button for it to point at: neither the bar nor
+    /// the floating button. Then the divider's tip need not wait (set by
+    /// `updateSplitBarTip`).
+    @Parameter static var lacksButton: Bool = false
+
+    var title: Text { Text("lc.flek.tip.splitSwap.title".loc) }
+    var message: Text? { Text("lc.flek.tip.splitSwap.message".loc) }
+    var image: Image? { Image(systemName: "rectangle.2.swap") }
+    /// Shown once at most, whether or not it was closed.
+    var options: [any TipOption] { MaxDisplayCount(1) }
+}
+
+/// That holding the bar's app button, or the floating button, lifts the app
+/// in use into Split View: beside the button while an app is in front on its
+/// own.
+@available(iOS 26.0, *)
+struct SplitBarTip: Tip {
+    var title: Text { Text("lc.flek.tip.splitBar.title".loc) }
+    var message: Text? { Text("lc.flek.tip.splitBar.message".loc) }
+    var image: Image? { Image(systemName: "rectangle.split.2x1") }
+    /// Shown once at most, whether or not it was closed.
+    var options: [any TipOption] { MaxDisplayCount(1) }
+}
+
+/// Points one of the home screen's Split View tips at the view it is put on:
+/// the running apps, or the dot. Nothing before iOS 26.
+struct SplitTipAnchor: ViewModifier {
+    enum Kind { case start, dot }
+    let kind: Kind
+    /// Along the bottom, the tip stands above the bar with its arrow pointing
+    /// down; down the Duo's side column, wherever there is room.
+    var pointsDown = true
+
+    func body(content: Content) -> some View {
+        if #available(iOS 26.0, *) {
+            content.modifier(SplitTipPopover(kind: kind, arrowEdge: pointsDown ? .bottom : nil))
+        } else {
+            content
+        }
+    }
+}
+
+@available(iOS 26.0, *)
+private struct SplitTipPopover: ViewModifier {
+    @ObservedObject private var dockManager = MultitaskDockManager.shared
+    let kind: SplitTipAnchor.Kind
+    let arrowEdge: Edge?
+
+    func body(content: Content) -> some View {
+        switch kind {
+        case .start:
+            content.popoverTip(currentTip(as: SplitStartTip.self), arrowEdge: arrowEdge)
+        case .dot:
+            content
+                .popoverTip(currentTip(as: SplitDotTip.self), arrowEdge: arrowEdge)
+                // The tip's dot in the green of the real one.
+                .tipImageStyle(Color(uiColor: .systemGreen))
+        }
+    }
+
+    /// The group's tip now, if it is this one, and only while the home screen is
+    /// what is showing. It stays where it is under apps in windows and under the
+    /// app switcher, and a tip from it stood over them, pointing at something
+    /// hidden; it waits instead, for the next time home is in view. None where
+    /// tips are not offered, so the group is never made there.
+    private func currentTip<T: Tip>(as type: T.Type) -> T? {
+        guard SplitTips.areOffered, dockManager.isHomeState, !dockManager.isAppSwitcherOpen else { return nil }
+        return SplitTips.home.currentTip as? T
     }
 }
 
@@ -9853,6 +10058,9 @@ extension MultitaskDockManager {
     /// anything is not something the pill otherwise shows. Published a turn
     /// later: this is asked during layout.
     func refreshSplitLight() {
+        noteSplitTipReadiness()
+        // Turned, resized, or the bar laid out again: the bar's tip too.
+        syncSplitBarTip()
         let light: SplitLight?
         if UIDevice.current.userInterfaceIdiom != .pad {
             light = nil
@@ -9880,6 +10088,10 @@ extension MultitaskDockManager {
         if splitHelpController != nil {
             hideSplitHelp()
             return
+        }
+        // Opened to see what it means: its tip has nothing left to say.
+        if #available(iOS 26.0, *), SplitTips.areOffered {
+            SplitDotTip().invalidate(reason: .actionPerformed)
         }
         guard var presenter = keyWindow?.rootViewController else { return }
         while let presented = presenter.presentedViewController { presenter = presented }
@@ -9924,6 +10136,279 @@ extension MultitaskDockManager {
         guard let help = splitHelpController else { return }
         splitHelpController = nil
         help.dismiss(animated: true)
+    }
+
+    // MARK: Split View tips
+
+    /// Tells the tip on how to start Split View whether two apps can go side by
+    /// side now, which it waits for. Only on a change, since setting it stores
+    /// it, and a turn later, as this is asked during layout.
+    private func noteSplitTipReadiness() {
+        guard #available(iOS 26.0, *), SplitTips.areOffered else { return }
+        let ready = canSplitNow
+        guard ready != splitTipReadiness else { return }
+        splitTipReadiness = ready
+        DispatchQueue.main.async { SplitStartTip.canSplit = ready }
+    }
+
+    /// Two apps side by side, however they got there: the tip on how to start
+    /// Split View is done with.
+    private func noteSplitViewUsed() {
+        guard !splitStartTipDone, #available(iOS 26.0, *), SplitTips.areOffered else { return }
+        splitStartTipDone = true
+        SplitStartTip().invalidate(reason: .actionPerformed)
+    }
+
+    /// The divider's tip, watched for while the divider is up: TipKit says when
+    /// it should show, which is until it has been closed, the line tapped, or
+    /// it has shown once. Put away whenever the divider goes.
+    private func syncSplitDividerTip(shown: Bool) {
+        guard #available(iOS 26.0, *), SplitTips.areOffered else { return }
+        if shown {
+            guard splitDividerTipTask == nil, !splitDividerTipFinished, let divider = splitDivider else { return }
+            // Done with, in this launch or an earlier one: never watched for again.
+            if case .invalidated = SplitDividerTip().status {
+                splitDividerTipFinished = true
+                return
+            }
+            splitDividerTipTask = Task { @MainActor [weak self] in
+                // Once the two have settled, not as they arrive.
+                try? await Task.sleep(nanoseconds: 800_000_000)
+                for await shouldDisplay in SplitDividerTip().shouldDisplayUpdates {
+                    guard let self, !Task.isCancelled else { return }
+                    if shouldDisplay {
+                        self.presentSplitDividerTip(at: divider)
+                    } else {
+                        self.dismissSplitDividerTip()
+                    }
+                }
+            }
+        } else {
+            splitDividerTipTask?.cancel()
+            splitDividerTipTask = nil
+            dismissSplitDividerTip()
+        }
+    }
+
+    /// TipKit's own popover beside the divider's handle, from whatever the main
+    /// window is showing, as the Split View help is.
+    @available(iOS 26.0, *)
+    @MainActor private func presentSplitDividerTip(at divider: SplitDividerView) {
+        guard splitDividerTipController == nil, isSplitShowing, splitDivider === divider,
+              !divider.isHidden, var presenter = keyWindow?.rootViewController else { return }
+        while let presented = presenter.presentedViewController { presenter = presented }
+        let tip = TipUIPopoverViewController(SplitDividerTip(), sourceItem: divider.tipAnchor)
+        // A popover on the Duo too, an iPhone, where iOS would make it a sheet
+        // (see `adaptivePresentationStyle`).
+        tip.presentationDelegate = self
+        // The line still answers while the tip is up: tapped, it opens its menu
+        // as the tip says, and it can still be dragged.
+        tip.popoverPresentationController?.passthroughViews = [divider]
+        splitDividerTipController = tip
+        presenter.present(tip, animated: true)
+    }
+
+    private func dismissSplitDividerTip() {
+        guard let tip = splitDividerTipController else { return }
+        splitDividerTipController = nil
+        if tip.presentingViewController != nil { tip.dismiss(animated: true) }
+    }
+
+    /// What the tip on holding the app button points at now: the floating
+    /// button where it stands in for the bar, otherwise the bar; nothing where
+    /// neither is on the screen.
+    private var splitBarTipHost: UIView? {
+        if usesFloatingButton {
+            guard let button = navAssistButton, !isNavAssistStashed, button.window != nil,
+                  !button.isHidden, button.alpha > 0.5 else { return nil }
+            return button
+        }
+        guard isSwitcherBarVisible, let bar = hostingController?.view, bar.window != nil,
+              !bar.isHidden, bar.alpha > 0.5 else { return nil }
+        return bar
+    }
+
+    /// The app button's place in the bar's own bounds. Down the Duo's side
+    /// column, the middle of the column. Along an edge, the middle of the flat
+    /// strip the buttons are centred in, below the corners carved into the app
+    /// above it; the bounds are always that strip, turned onto its edge.
+    private func barAppButtonFrame(in bounds: CGRect) -> CGRect {
+        if isSideColumnBar {
+            let size = FlekTheme.sideBarButtonSize
+            return CGRect(x: bounds.midX - size / 2, y: bounds.midY - size / 2, width: size, height: size)
+        }
+        let height = Constants.barButtonSize * Constants.barContentScale
+        // About the button's width with an app's name in it.
+        let width = height * 3
+        let centerY = bounds.maxY - barFlatRegion / 2
+        return CGRect(x: bounds.midX - width / 2, y: centerY - height / 2, width: width, height: height)
+    }
+
+    /// The tip on holding the app button, watched for while an app is in front
+    /// on its own with the bar, or the floating button, there to hold, and two
+    /// apps can go side by side. Asked again as any of that changes, a turn
+    /// later, as some of it is asked during layout.
+    private func syncSplitBarTip() {
+        guard #available(iOS 26.0, *), SplitTips.areOffered, !splitBarTipsFinished else { return }
+        DispatchQueue.main.async { [weak self] in self?.updateSplitBarTip() }
+    }
+
+    @available(iOS 26.0, *)
+    private func updateSplitBarTip() {
+        noteSplitSwapTipDone()
+        // Both of the button's tips done with, in this launch or an earlier
+        // one: nothing left to watch for. Asked on every layout of the bar
+        // until then, and never again after.
+        if SplitSwapTip.isDone, case .invalidated = SplitBarTip().status {
+            splitBarTipsFinished = true
+            stopSplitBarTip()
+            return
+        }
+        let host = splitBarTipHost
+        // Beside another app with no button to hold (the bar put away, no
+        // floating button), the swap tip has nothing to point at, and the
+        // divider's tip, which waits for it, goes first instead.
+        if isSplitShowing, splitPair?.choosingSide == nil, (host == nil) != splitSwapTipLacksButton {
+            splitSwapTipLacksButton = host == nil
+            SplitSwapTip.lacksButton = host == nil
+        }
+        let ready = host != nil && !isHomeState && !isAppSwitcherOpen && splitLift == nil
+            && frontmostAppUUID != nil && canSplitNow
+        // Alone, how to start Split View with the button. Beside another app,
+        // once there is one on each side, how to swap them with it; beside the
+        // apps to choose from, neither.
+        let swap: Bool? = !ready ? nil
+            : !isSplitShowing ? false
+            : splitPair?.choosingSide == nil ? true : nil
+        // Shown beside what is no longer there, or the other of the two now:
+        // shown again, as it is now.
+        if let swap, splitBarTipTask != nil, splitBarTipAnchor !== host || splitBarTipIsSwap != swap {
+            stopSplitBarTip()
+        }
+        guard let swap, let host else {
+            stopSplitBarTip()
+            return
+        }
+        guard splitBarTipTask == nil else {
+            // Laid out again, turned or resized: the tip's pointer follows the bar.
+            placeSplitBarTipPointer()
+            return
+        }
+        splitBarTipAnchor = host
+        splitBarTipIsSwap = swap
+        splitBarTipTask = Task { @MainActor [weak self] in
+            // Once the app has settled in front, or the two in their sides, not
+            // as they arrive.
+            try? await Task.sleep(nanoseconds: 1_000_000_000)
+            guard let self, !Task.isCancelled else { return }
+            if swap {
+                await self.watchSplitBarTip(SplitSwapTip())
+            } else {
+                await self.watchSplitBarTip(SplitBarTip())
+            }
+        }
+    }
+
+    /// Shows `tip` beside the button while TipKit says it should be, and puts it
+    /// away when it says not.
+    @available(iOS 26.0, *)
+    @MainActor private func watchSplitBarTip(_ tip: some Tip) async {
+        for await shouldDisplay in tip.shouldDisplayUpdates {
+            guard !Task.isCancelled else { return }
+            if shouldDisplay {
+                presentSplitBarTip(tip)
+            } else {
+                dismissSplitBarTip()
+                noteSplitSwapTipDone()
+            }
+        }
+    }
+
+    /// The tip on swapping with the button done with, however that came about:
+    /// closed, done, or shown its one time. The divider's tip comes next.
+    @available(iOS 26.0, *)
+    private func noteSplitSwapTipDone() {
+        guard !SplitSwapTip.isDone, case .invalidated = SplitSwapTip().status else { return }
+        SplitSwapTip.isDone = true
+    }
+
+    private func stopSplitBarTip() {
+        splitBarTipTask?.cancel()
+        splitBarTipTask = nil
+        splitBarTipAnchor = nil
+        splitBarTipIsSwap = nil
+        dismissSplitBarTip()
+    }
+
+    /// TipKit's own popover over the app button, or beside the floating button,
+    /// from the window they are in: the overlay's, above the app.
+    @available(iOS 26.0, *)
+    @MainActor private func presentSplitBarTip(_ content: some Tip) {
+        guard splitBarTipController == nil, let host = splitBarTipAnchor, host === splitBarTipHost,
+              var presenter = host.window?.rootViewController else { return }
+        while let presented = presenter.presentedViewController { presenter = presented }
+        let source: UIView
+        if host === navAssistButton {
+            source = host
+        } else {
+            // A view over the app button to point at. A popover points only at a
+            // view or a toolbar button, and any other kind of source is an
+            // assertion in UIKit that ends FlekDeck. The bar itself is SwiftUI's
+            // view, which has nothing added to it, so this goes in the bar's own
+            // superview, a plain view, under the bar and out of touches' way.
+            guard let container = host.superview else { return }
+            splitBarTipPointer?.removeFromSuperview()
+            let pointer = UIView()
+            pointer.isUserInteractionEnabled = false
+            container.insertSubview(pointer, belowSubview: host)
+            splitBarTipPointer = pointer
+            placeSplitBarTipPointer()
+            source = pointer
+        }
+        let tip = TipUIPopoverViewController(content, sourceItem: source)
+        // A popover on the Duo too, as the divider's tip is.
+        tip.presentationDelegate = self
+        // The button still answers while the tip is up: held, it lifts the app
+        // as the tip says, and it can still be tapped or swiped along.
+        tip.popoverPresentationController?.passthroughViews = [host]
+        splitBarTipController = tip
+        presenter.present(tip, animated: true)
+    }
+
+    /// The bar tip's pointer over the app button, wherever the bar is now: the
+    /// button's place in the bar's own bounds, carried out into its superview.
+    private func placeSplitBarTipPointer() {
+        guard let pointer = splitBarTipPointer, let bar = splitBarTipAnchor,
+              bar !== navAssistButton, let container = pointer.superview else { return }
+        pointer.frame = bar.convert(barAppButtonFrame(in: bar.bounds), to: container)
+        splitBarTipController?.popoverPresentationController?.containerView?.setNeedsLayout()
+    }
+
+    private func dismissSplitBarTip() {
+        let pointer = splitBarTipPointer
+        splitBarTipPointer = nil
+        let tip = splitBarTipController
+        splitBarTipController = nil
+        guard let tip, tip.presentingViewController != nil else {
+            pointer?.removeFromSuperview()
+            return
+        }
+        // The pointer goes once the popover has, not from under it.
+        tip.dismiss(animated: true) { pointer?.removeFromSuperview() }
+    }
+
+    /// The app lifted by holding the bar's app button or the floating button,
+    /// as the bar's tip says: it is done with. Beside another app, holding it is
+    /// how the two swap, so the tip on that is done with too, and the divider's
+    /// comes next.
+    private func noteSplitBarTipUsed() {
+        guard #available(iOS 26.0, *), SplitTips.areOffered else { return }
+        SplitBarTip().invalidate(reason: .actionPerformed)
+        if isSplitShowing {
+            SplitSwapTip().invalidate(reason: .actionPerformed)
+            SplitSwapTip.isDone = true
+        }
+        stopSplitBarTip()
     }
 
     /// The page `uuid`'s window has, in the window host's coordinates, or null
@@ -10251,6 +10736,7 @@ extension MultitaskDockManager {
         guard splitLiftArmed, let uuid = frontmostAppUUID,
               beginSplitLift(of: uuid, at: point, keepingGrabPoint: keepingGrabPoint) else { return false }
         splitAppButtonTapSuppressed = true
+        noteSplitBarTipUsed()
         return true
     }
 
@@ -10944,6 +11430,9 @@ extension MultitaskDockManager {
 
     private func applySplitChrome() {
         let showing = isSplitShowing
+        if showing { noteSplitViewUsed() }
+        // Alone or beside another app: which of the button's two tips, if either.
+        syncSplitBarTip()
         let windows = showing ? (splitPair?.members.compactMap { splitWindow(of: $0) } ?? []) : []
         windowHostingView.splitWindows = showing ? windows : nil
         // In view, and staying: neither setting off home, and at least one of them
@@ -10970,6 +11459,7 @@ extension MultitaskDockManager {
         // one app does, but for iOS's own indicator.
         syncSplitHandles(shown: inView && !usesFloatingButton, faded: lifting)
         guard inView, !lifting, let host = windowHostingView.superview else {
+            syncSplitDividerTip(shown: false)
             if splitPair == nil {
                 removeSplitDivider()
                 splitCurtain?.removeFromSuperview()
@@ -10999,6 +11489,9 @@ extension MultitaskDockManager {
         divider.showsPaired = isSplitPairSaved
         setSplitDividerShown(true)
         arrangeSplitChrome()
+        // Once there is an app on each side: beside the apps to choose from,
+        // there is nothing yet to pair, and the tip says to pair them.
+        syncSplitDividerTip(shown: splitPair?.choosingSide == nil)
     }
 
     /// The divider faded in or out with the windows it stands between, rather
@@ -11522,6 +12015,11 @@ extension MultitaskDockManager {
     @objc private func splitDividerTapped() {
         guard isSplitShowing, splitLift == nil, let divider = splitDivider,
               divider.transform == .identity else { return }
+        // Done what its tip says.
+        if #available(iOS 26.0, *), SplitTips.areOffered {
+            SplitDividerTip().invalidate(reason: .actionPerformed)
+            dismissSplitDividerTip()
+        }
         divider.showMenu()
     }
 
@@ -12176,6 +12674,8 @@ final class SplitDividerView: UIView, UIContextMenuInteractionDelegate {
                                                                                                  weight: .semibold)))
     /// What the menu hangs from: the handle.
     private let menuAnchor = UIView()
+    /// What the divider's tip points at: the handle, as the menu does.
+    var tipAnchor: UIView { menuAnchor }
     private lazy var menuInteraction = UIContextMenuInteraction(delegate: self)
     /// A tap asked for the menu. A finger held on the line is a drag that has
     /// yet to move, and opens nothing.
