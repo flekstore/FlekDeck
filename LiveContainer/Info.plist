@@ -42,11 +42,11 @@
 	<!-- FlekDeck's own version. The LiveContainer release this is built on is
 	     LCUpstreamVersion below; the two move independently. -->
 	<key>CFBundleShortVersionString</key>
-	<string>0.2.0</string>
+	<string>0.3.0</string>
 	<!-- Release date of the version above, shown on the About and License
 	     page in Settings. Bump it together with the version. -->
 	<key>LCReleaseDate</key>
-	<string>2026-10-28</string>
+	<string>2026-11-16</string>
 	<!-- The upstream LiveContainer release this build was merged up to. Shown
 	     under the version in Settings and on the About and License page, so
 	     that a bug report says which upstream a build carries. Bump it when
@@ -67,7 +67,7 @@
 		</dict>
 	</array>
 	<key>CFBundleVersion</key>
-	<string>0.2.0</string>
+	<string>0.3.0</string>
 	<key>GCSupportedGameControllers</key>
 	<array>
 		<dict>
